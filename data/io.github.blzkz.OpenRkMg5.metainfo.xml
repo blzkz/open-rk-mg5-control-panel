@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.blzkz.OpenRkMg5</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>Panel RK MG5</name>
+  <summary>Control panel for the Royal Kludge MG5 mouse</summary>
+  <description>
+    <p>
+      Open source control panel for the Royal Kludge MG5 mouse on Linux. Configure DPI levels and their
+      colours, polling rate, lift-off distance, debounce, sensor mode, Motion Sync, Ripple Control,
+      angle snapping, glass mode and sleep time, remap the six buttons and keep complete profiles that
+      can be switched from the system tray.
+    </p>
+    <p>Not affiliated with or endorsed by Royal Kludge.</p>
+  </description>
+  <launchable type="desktop-id">io.github.blzkz.OpenRkMg5.desktop</launchable>
+  <url type="homepage">https://github.com/blzkz/open-rk-mg5-control-panel</url>
+  <url type="bugtracker">https://github.com/blzkz/open-rk-mg5-control-panel/issues</url>
+  <developer id="io.github.blzkz">
+    <name>blzkz</name>
+  </developer>
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/blzkz/open-rk-mg5-control-panel/main/docs/screenshot.png</image>
+    </screenshot>
+  </screenshots>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.2.0" date="2026-10-10"/>
+  </releases>
+</component>

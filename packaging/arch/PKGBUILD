@@ -1,0 +1,18 @@
+# Maintainer: blzkz
+pkgname=open-rk-mg5-control-panel
+pkgver=0.2.0
+pkgrel=1
+pkgdesc="Control panel for the Royal Kludge MG5 mouse (DPI, polling, sensor, buttons, profiles)"
+arch=('any')
+url="https://github.com/blzkz/open-rk-mg5-control-panel"
+license=('GPL-3.0-or-later')
+depends=('python' 'python-gobject' 'gtk4' 'libadwaita')
+install=open-rk-mg5-control-panel.install
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+package() {
+    cd "$pkgname-$pkgver"
+    DESTDIR="$pkgdir" PREFIX=/usr ./packaging/install.sh
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

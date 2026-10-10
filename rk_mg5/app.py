@@ -10,13 +10,13 @@ gi.require_version("Adw", "1")
 gi.require_version("Gdk", "4.0")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
+from . import __version__  # noqa: E402
 from . import actions as a  # noqa: E402
 from . import protocol as p  # noqa: E402
 from .mouse_view import MouseView  # noqa: E402
 from .settings import Profile, ProfileStore, Settings  # noqa: E402
 from .tray import MenuItem, TrayIcon  # noqa: E402
 
-__version__ = "0.2.0"
 
 APP_ID = "io.github.blzkz.OpenRkMg5"
 APP_NAME = "Panel RK MG5"

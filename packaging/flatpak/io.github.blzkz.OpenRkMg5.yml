@@ -1,0 +1,22 @@
+app-id: io.github.blzkz.OpenRkMg5
+runtime: org.gnome.Platform
+runtime-version: '47'
+sdk: org.gnome.Sdk
+command: rk-mg5-panel
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=all                         # /dev/hidraw* (needs the udev rule on the host)
+  - --talk-name=org.kde.StatusNotifierWatcher
+  - --own-name=org.kde.*                 # tray icon (StatusNotifierItem)
+  - --filesystem=xdg-config/autostart:create
+modules:
+  - name: open-rk-mg5-control-panel
+    buildsystem: simple
+    build-commands:
+      - DESTDIR= PREFIX=/app NO_UDEV=1 ./packaging/install.sh
+      - install -Dm644 udev/70-rk-mg5.rules /app/share/open-rk-mg5/70-rk-mg5.rules
+    sources:
+      - type: dir
+        path: ../..

@@ -5,6 +5,7 @@ StatusNotifierItems, so we speak the protocol directly with Gio.
 """
 
 import os
+import random
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -142,7 +143,7 @@ class TrayIcon:
         self.revision = 1
         self.items: dict[int, MenuItem] = {}
         self.root = MenuItem(children=[])
-        self.bus_name = f"org.kde.StatusNotifierItem-{os.getpid()}-1"
+        self.bus_name = f"org.kde.StatusNotifierItem-{os.getpid()}-{random.randint(1, 999999)}"
         self.connection: Gio.DBusConnection | None = None
         self._registrations = []
         self._name_id = 0

@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import shutil
 import sys
 from dataclasses import asdict, dataclass, field, fields
 
@@ -13,7 +14,17 @@ from . import protocol as p
 CONFIG_DIR = os.path.join(GLib.get_user_config_dir(), "open-rk-mg5")
 SETTINGS_FILE = os.path.join(CONFIG_DIR, "settings.json")
 PROFILES_DIR = os.path.join(CONFIG_DIR, "profiles")
-AUTOSTART_FILE = os.path.join(GLib.get_user_config_dir(), "autostart", "io.github.blzkz.OpenRkMg5.desktop")
+# Inside Flatpak the config dir is sandboxed; the autostart entry must go to the host's ~/.config.
+AUTOSTART_FILE = os.path.expanduser("~/.config/autostart/io.github.blzkz.OpenRkMg5.desktop")
+
+
+def _launch_command() -> str:
+    if os.environ.get("FLATPAK_ID"):
+        return f"flatpak run {os.environ['FLATPAK_ID']}"
+    if shutil.which("rk-mg5-panel"):
+        return "rk-mg5-panel"
+    package_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return f"env PYTHONPATH={package_dir} {sys.executable} -m rk_mg5"
 
 
 def _write_json(path: str, data: dict) -> None:
@@ -52,7 +63,6 @@ class Settings:
             if os.path.exists(AUTOSTART_FILE):
                 os.remove(AUTOSTART_FILE)
             return
-        package_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         os.makedirs(os.path.dirname(AUTOSTART_FILE), exist_ok=True)
         with open(AUTOSTART_FILE, "w") as f:
             f.write(
@@ -60,7 +70,7 @@ class Settings:
                 "Type=Application\n"
                 "Name=Panel RK MG5\n"
                 "Comment=Configura el ratón Royal Kludge MG5\n"
-                f"Exec=env PYTHONPATH={package_dir} {sys.executable} -m rk_mg5 --hidden\n"
+                f"Exec={_launch_command()} --hidden\n"
                 "Icon=input-mouse\n"
                 "Terminal=false\n"
                 "X-GNOME-Autostart-enabled=true\n"
