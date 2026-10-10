@@ -1,0 +1,126 @@
+name: Build packages
+
+# Publishing a GitHub release builds every package and attaches it to the release.
+# "Run workflow" builds them too, as downloadable artifacts only.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  NAME: open-rk-mg5-control-panel
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            V="${{ github.event.release.tag_name }}"
+            V="${V#v}"
+          else
+            V=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' rk_mg5/__init__.py)
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+  arch:
+    needs: version
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    env:
+      V: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build package
+        run: |
+          ./packaging/set-version.sh "$V"
+          useradd -m builder
+          mkdir -p /tmp/build
+          cp packaging/arch/* /tmp/build/
+          ./packaging/make-tarball.sh "$V" /tmp/build
+          chown -R builder /tmp/build
+          su builder -c "cd /tmp/build && makepkg -f --nodeps"
+          mkdir -p dist && cp /tmp/build/*.pkg.tar.zst dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arch
+          path: dist/*
+
+  fedora:
+    needs: version
+    runs-on: ubuntu-latest
+    container: fedora:latest
+    env:
+      V: ${{ needs.version.outputs.version }}
+    steps:
+      - run: dnf install -y rpm-build tar gzip sed
+      - uses: actions/checkout@v4
+      - name: Build package
+        run: |
+          ./packaging/set-version.sh "$V"
+          ./packaging/make-tarball.sh "$V" "$HOME/rpmbuild/SOURCES"
+          rpmbuild -bb packaging/rpm/$NAME.spec
+          mkdir -p dist && cp "$HOME"/rpmbuild/RPMS/noarch/*.rpm dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fedora
+          path: dist/*
+
+  debian:
+    needs: version
+    runs-on: ubuntu-latest
+    env:
+      V: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build package
+        run: |
+          ./packaging/set-version.sh "$V"
+          ./packaging/deb/build-deb.sh "$V" dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: debian
+          path: dist/*
+
+  flatpak:
+    needs: version
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-47
+      options: --privileged
+    env:
+      V: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./packaging/set-version.sh "$V"
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: ${{ env.NAME }}-${{ env.V }}.flatpak
+          manifest-path: packaging/flatpak/io.github.blzkz.OpenRkMg5.yml
+          cache-key: flatpak-builder-${{ github.sha }}
+          upload-artifact: false
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flatpak
+          path: ${{ env.NAME }}-${{ env.V }}.flatpak
+
+  publish:
+    if: github.event_name == 'release'
+    needs: [arch, fedora, debian, flatpak]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Attach packages to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" dist/* --clobber --repo "${{ github.repository }}"

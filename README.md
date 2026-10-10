@@ -10,11 +10,23 @@ El protocolo está documentado en [docs/PROTOCOL.md](docs/PROTOCOL.md).
 ![Personalizar](docs/screenshot.png)
 ![Rendimiento](docs/screenshot-performance.png)
 
-## Requisitos
+## Instalación
 
-- Python 3.10 o superior
-- GTK 4 y libadwaita con PyGObject (en Arch/CachyOS: `python-gobject gtk4 libadwaita`)
+Cada versión publicada en [Releases](https://github.com/blzkz/open-rk-mg5-control-panel/releases) trae paquetes listos:
 
+| Distribución | Archivo | Instalar |
+|---|---|---|
+| Arch, CachyOS, Manjaro | `.pkg.tar.zst` | `sudo pacman -U open-rk-mg5-control-panel-*.pkg.tar.zst` |
+| Fedora | `.rpm` | `sudo dnf install ./open-rk-mg5-control-panel-*.rpm` |
+| Ubuntu 24.04+, Debian 13+ | `.deb` | `sudo apt install ./open-rk-mg5-control-panel_*_all.deb` |
+| Cualquier otra (Flatpak) | `.flatpak` | `flatpak install --user open-rk-mg5-control-panel-*.flatpak` |
+
+Los paquetes nativos instalan también la regla udev que da acceso al ratón. Con Flatpak hay que añadirla a mano
+(ver [Permisos](#permisos)); la app te lo recuerda si falta.
+
+### Desde el código
+
+Requiere Python 3.10+, GTK 4 y libadwaita 1.5+ con PyGObject (en Arch/CachyOS: `python-gobject gtk4 libadwaita`).
 No hay más dependencias: la comunicación con el ratón va directamente por `/dev/hidraw`.
 
 ## Permisos
@@ -25,8 +37,6 @@ Para acceder al ratón sin root hace falta la regla udev de `udev/70-rk-mg5.rule
 sudo cp udev/70-rk-mg5.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
-
-Un paquete de distribución la instalaría en `/usr/lib/udev/rules.d/`.
 
 ## Uso
 
@@ -55,6 +65,12 @@ funciona en KDE Plasma y en GNOME con la extensión AppIndicator.
 
 En Preferencias se elige si cerrar la ventana la minimiza a la bandeja, si arranca con la sesión y el umbral
 de batería baja.
+
+## Publicar una versión
+
+1. Actualiza `__version__` en `rk_mg5/__init__.py` y añade la versión a `data/io.github.blzkz.OpenRkMg5.metainfo.xml`.
+2. Crea una release en GitHub con una etiqueta `vX.Y.Z`.
+3. El workflow *Build packages* compila los cuatro paquetes y los adjunta a la release.
 
 ## Licencia
 
