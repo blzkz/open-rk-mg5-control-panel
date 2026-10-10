@@ -12,8 +12,13 @@ from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 from . import actions as a  # noqa: E402
 from . import protocol as p  # noqa: E402
 from .mouse_view import MouseView  # noqa: E402
+from .settings import Profile, ProfileStore, Settings  # noqa: E402
+from .tray import MenuItem, TrayIcon  # noqa: E402
+
+__version__ = "0.2.0"
 
 APP_ID = "io.github.blzkz.OpenRkMg5"
+APP_NAME = "Panel RK MG5"
 UDEV_RULE = 'SUBSYSTEM=="hidraw", ATTRS{idVendor}=="372e", ATTRS{idProduct}=="103f|1073", TAG+="uaccess"'
 BATTERY_POLL_SECONDS = 60
 DPI_APPLY_DELAY_MS = 500
@@ -164,7 +169,8 @@ class DpiLevelRow(Adw.ActionRow):
 
 class MainWindow(Adw.ApplicationWindow):
     def __init__(self, app: Adw.Application):
-        super().__init__(application=app, title="Panel RK MG5", default_width=1180, default_height=780)
+        super().__init__(application=app, title=APP_NAME, default_width=1180, default_height=780)
+        self.app = app
         self.mouse: p.MG5 | None = None
         self.config: p.Config | None = None
         self.keys: list[int] = list(a.DEFAULT_KEYS)
@@ -208,6 +214,31 @@ class MainWindow(Adw.ApplicationWindow):
         refresh = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text="Volver a leer el ratón")
         refresh.connect("clicked", lambda *_: self.connect_mouse())
         header.pack_start(refresh)
+
+        profiles = Gtk.Box(css_classes=["linked"])
+        self.profile_dropdown = Gtk.DropDown(model=Gtk.StringList(), tooltip_text="Perfil activo")
+        self.profile_dropdown.connect("notify::selected", self._on_profile_selected)
+        profiles.append(self.profile_dropdown)
+        profile_menu = Gio.Menu()
+        profile_menu.append("Nuevo perfil con la configuración actual", "win.profile-new")
+        profile_menu.append("Duplicar perfil", "win.profile-duplicate")
+        profile_menu.append("Renombrar perfil", "win.profile-rename")
+        profile_menu.append("Eliminar perfil", "win.profile-delete")
+        profiles.append(Gtk.MenuButton(icon_name="view-more-symbolic", menu_model=profile_menu,
+                                       tooltip_text="Gestionar perfiles"))
+        header.pack_start(profiles)
+        for name, callback in (("profile-new", self._profile_new), ("profile-duplicate", self._profile_duplicate),
+                               ("profile-rename", self._profile_rename), ("profile-delete", self._profile_delete)):
+            action = Gio.SimpleAction(name=name)
+            action.connect("activate", lambda *_a, cb=callback: cb())
+            self.add_action(action)
+
+        main_menu = Gio.Menu()
+        main_menu.append("Preferencias", "app.preferences")
+        main_menu.append("Acerca de Panel RK MG5", "app.about")
+        main_menu.append("Salir", "app.quit")
+        header.pack_end(Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=main_menu, primary=True,
+                                       tooltip_text="Menú principal"))
 
         battery = Gtk.Box(spacing=6, css_classes=["battery"])
         self.battery_icon = Gtk.Image(icon_name="battery-missing-symbolic")
@@ -440,6 +471,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._load_config()
         self._load_keys()
         self.stack.set_visible_child_name("settings")
+        self._ensure_profile()
 
     def _retry_offline(self) -> bool:
         self._retry_source = 0
@@ -456,8 +488,11 @@ class MainWindow(Adw.ApplicationWindow):
         self.config = None
 
     def _on_close(self, *_args) -> bool:
-        self._disconnect()
-        return False
+        if self.app.settings.close_to_tray and self.app.tray is not None:
+            self.set_visible(False)
+            return True
+        self.app.quit_app()
+        return True
 
     def _show_status(self, title: str, description: str, show_rule: bool = False) -> None:
         self._disconnect()
@@ -525,6 +560,7 @@ class MainWindow(Adw.ApplicationWindow):
         self.battery_big.set_label(f"{battery.percent} %")
         self.battery_bar.set_value(battery.percent)
         self.battery_state.set_label("Cargando" if battery.charging else "Funcionando con batería")
+        self.app.update_battery(battery)
 
     def _poll_battery(self) -> bool:
         if self.mouse is not None:
@@ -570,7 +606,9 @@ class MainWindow(Adw.ApplicationWindow):
                 raise p.MouseOffline()
             write(self.mouse, self.config)
             self.config = self.mouse.read_config()
+            self.keys = self.mouse.read_keys()
             ok = True
+            self._autosave_profile()
         except p.MouseOffline:
             self.toast("El ratón está dormido: muévelo y vuelve a intentarlo")
         except (p.MG5Error, OSError) as e:
@@ -623,11 +661,7 @@ class MainWindow(Adw.ApplicationWindow):
         if raw != a.LEFT_CLICK and self.keys[index] == a.LEFT_CLICK and self.keys.count(a.LEFT_CLICK) == 1:
             self.toast("Asigna antes el clic izquierdo a otro botón")
             return
-        if self.apply(lambda m, c: m.set_key(index, raw)):
-            try:
-                self.keys = self.mouse.read_keys()
-            except (p.MG5Error, OSError):
-                self.keys[index] = raw
+        self.apply(lambda m, c: m.set_key(index, raw))
         self._load_keys()
 
     def _start_key_capture(self) -> None:
@@ -660,13 +694,155 @@ class MainWindow(Adw.ApplicationWindow):
         self._assign(raw)
         return True
 
+    # -- profiles --------------------------------------------------------------
+
+    def refresh_profiles(self) -> None:
+        names = self.app.profiles.names
+        self.loading = True
+        try:
+            self.profile_dropdown.set_model(Gtk.StringList.new(names))
+            active = self.app.settings.active_profile
+            self.profile_dropdown.set_selected(names.index(active) if active in names else Gtk.INVALID_LIST_POSITION)
+        finally:
+            self.loading = False
+        self.app.refresh_tray()
+
+    def _ensure_profile(self) -> None:
+        """First run: turn whatever the mouse has into the default profile."""
+        if self.app.profiles.names:
+            return
+        profile = Profile.from_mouse("Predeterminado", self.config, self.keys)
+        self.app.profiles.save(profile)
+        self.app.settings.active_profile = profile.name
+        self.app.settings.save()
+        self.refresh_profiles()
+
+    def _autosave_profile(self) -> None:
+        name = self.app.settings.active_profile
+        if name and name in self.app.profiles.profiles and self.config is not None:
+            self.app.profiles.save(Profile.from_mouse(name, self.config, self.keys))
+
+    def _on_profile_selected(self, dropdown, _pspec) -> None:
+        if self.loading:
+            return
+        index = dropdown.get_selected()
+        names = self.app.profiles.names
+        if 0 <= index < len(names):
+            self.switch_profile(names[index])
+
+    def switch_profile(self, name: str) -> bool:
+        profile = self.app.profiles.get(name)
+        if profile is None:
+            return False
+        previous = self.app.settings.active_profile
+        # Don't autosave into the old profile while writing the new one.
+        self.app.settings.active_profile = ""
+        ok = self.apply(lambda m, c: profile.apply_to(m))
+        self.app.settings.active_profile = name if ok else previous
+        self.app.settings.save()
+        if ok:
+            self._load_keys()
+            self.toast(f"Perfil «{name}» aplicado")
+        self.refresh_profiles()
+        return ok
+
+    def _ask_name(self, heading: str, initial: str, on_done) -> None:
+        dialog = Adw.AlertDialog(heading=heading)
+        entry = Gtk.Entry(text=initial, activates_default=True)
+        dialog.set_extra_child(entry)
+        dialog.add_response("cancel", "Cancelar")
+        dialog.add_response("ok", "Aceptar")
+        dialog.set_response_appearance("ok", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("ok")
+
+        def on_response(_dialog, response):
+            name = entry.get_text().strip()
+            if response == "ok" and name:
+                on_done(name)
+
+        dialog.connect("response", on_response)
+        dialog.present(self)
+
+    def _profile_new(self) -> None:
+        if self.config is None:
+            self.toast("Conecta el ratón para crear un perfil")
+            return
+
+        def create(name):
+            name = self.app.profiles.unique_name(name)
+            self.app.profiles.save(Profile.from_mouse(name, self.config, self.keys))
+            self.app.settings.active_profile = name
+            self.app.settings.save()
+            self.refresh_profiles()
+
+        self._ask_name("Nuevo perfil", self.app.profiles.unique_name("Perfil"), create)
+
+    def _profile_duplicate(self) -> None:
+        source = self.app.profiles.get(self.app.settings.active_profile)
+        if source is None:
+            return
+
+        def duplicate(name):
+            name = self.app.profiles.unique_name(name)
+            self.app.profiles.save(Profile(**{**source.__dict__, "name": name}))
+            self.app.settings.active_profile = name
+            self.app.settings.save()
+            self.refresh_profiles()
+
+        self._ask_name("Duplicar perfil", self.app.profiles.unique_name(source.name), duplicate)
+
+    def _profile_rename(self) -> None:
+        old = self.app.settings.active_profile
+        if old not in self.app.profiles.profiles:
+            return
+
+        def rename(new):
+            if new != old:
+                new = self.app.profiles.unique_name(new)
+                self.app.profiles.rename(old, new)
+                self.app.settings.active_profile = new
+                self.app.settings.save()
+            self.refresh_profiles()
+
+        self._ask_name("Renombrar perfil", old, rename)
+
+    def _profile_delete(self) -> None:
+        name = self.app.settings.active_profile
+        if name not in self.app.profiles.profiles:
+            return
+        if len(self.app.profiles.names) == 1:
+            self.toast("No puedes borrar el único perfil")
+            return
+        dialog = Adw.AlertDialog(heading=f"¿Eliminar el perfil «{name}»?",
+                                 body="El ratón se queda con su configuración actual.")
+        dialog.add_response("cancel", "Cancelar")
+        dialog.add_response("delete", "Eliminar")
+        dialog.set_response_appearance("delete", Adw.ResponseAppearance.DESTRUCTIVE)
+
+        def on_response(_dialog, response):
+            if response == "delete":
+                self.app.profiles.delete(name)
+                self.app.settings.active_profile = self.app.profiles.names[0]
+                self.app.settings.save()
+                self.refresh_profiles()
+
+        dialog.connect("response", on_response)
+        dialog.present(self)
+
     def toast(self, message: str) -> None:
         self.toasts.add_toast(Adw.Toast(title=message))
 
 
 class Application(Adw.Application):
-    def __init__(self):
+    def __init__(self, start_hidden: bool = False):
         super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
+        self.start_hidden = start_hidden
+        self.settings = Settings.load()
+        self.profiles = ProfileStore()
+        self.tray: TrayIcon | None = None
+        self.window: MainWindow | None = None
+        self.battery: p.Battery | None = None
+        self._low_battery_notified = False
 
     def do_startup(self):
         Adw.Application.do_startup(self)
@@ -676,11 +852,186 @@ class Application(Adw.Application):
         Gtk.StyleContext.add_provider_for_display(
             Gdk.Display.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
         )
+        for name, callback in (("preferences", self.show_preferences), ("about", self.show_about),
+                               ("quit", self.quit_app), ("show", self.show_window)):
+            action = Gio.SimpleAction(name=name)
+            action.connect("activate", lambda *_a, cb=callback: cb())
+            self.add_action(action)
+        self.set_accels_for_action("app.quit", ["<Control>q"])
+
+        try:
+            self.tray = TrayIcon("open-rk-mg5", APP_NAME, self.toggle_window)
+            self.tray.start()
+            # Keep running while the window is hidden in the tray.
+            self.hold()
+        except GLib.Error:
+            self.tray = None
 
     def do_activate(self):
-        window = self.get_active_window() or MainWindow(self)
-        window.present()
+        first = self.window is None
+        if first:
+            self.window = MainWindow(self)
+            self.window.refresh_profiles()
+        if first and (self.start_hidden or self.settings.start_hidden) and self.tray is not None:
+            return
+        self.show_window()
+
+    # -- window / tray ---------------------------------------------------------
+
+    def show_window(self) -> None:
+        if self.window is not None:
+            self.window.set_visible(True)
+            self.window.present()
+
+    def toggle_window(self) -> None:
+        if self.window is not None and self.window.get_visible() and self.window.is_active():
+            self.window.set_visible(False)
+        else:
+            self.show_window()
+
+    def quit_app(self) -> None:
+        if self.window is not None:
+            self.window._disconnect()
+        if self.tray is not None:
+            self.tray.stop()
+            self.tray = None
+            self.release()
+        self.quit()
+
+    def update_battery(self, battery: p.Battery) -> None:
+        self.battery = battery
+        low = battery.percent <= self.settings.low_battery_threshold and not battery.charging
+        if low and self.settings.low_battery_notify and not self._low_battery_notified:
+            notification = Gio.Notification.new("Batería baja en el RK MG5")
+            notification.set_body(f"Queda un {battery.percent} %. Conecta el cable para cargarlo.")
+            notification.set_icon(Gio.ThemedIcon.new("battery-caution"))
+            self.send_notification("low-battery", notification)
+            self._low_battery_notified = True
+        elif not low:
+            self._low_battery_notified = False
+            self.withdraw_notification("low-battery")
+        self.refresh_tray()
+
+    def refresh_tray(self) -> None:
+        if self.tray is None:
+            return
+        battery = self.battery
+        low = battery is not None and battery.percent <= self.settings.low_battery_threshold and not battery.charging
+        if battery is None:
+            icon, battery_text = "input-mouse", "Batería: desconocida"
+        elif battery.charging:
+            icon, battery_text = "battery-good-charging", f"Batería: {battery.percent} % (cargando)"
+        elif low:
+            icon, battery_text = "battery-caution", f"Batería baja: {battery.percent} %"
+        else:
+            icon, battery_text = "input-mouse", f"Batería: {battery.percent} %"
+        self.tray.set_icon(icon)
+        self.tray.set_status("NeedsAttention" if low else "Active")
+        active = self.settings.active_profile
+        self.tray.set_tooltip("RK MG5", f"{battery_text}\nPerfil: {active or '—'}")
+
+        items = [
+            MenuItem("Mostrar panel", self.show_window, icon="input-mouse"),
+            MenuItem(battery_text, enabled=False, icon="battery-caution" if low else "battery-good"),
+            MenuItem(separator=True),
+            MenuItem("Perfiles", enabled=False),
+        ]
+        for name in self.profiles.names:
+            items.append(MenuItem(name, lambda n=name: self._switch_from_tray(n), radio=True, checked=name == active))
+        items += [
+            MenuItem(separator=True),
+            MenuItem("Preferencias", self._preferences_from_tray, icon="preferences-system"),
+            MenuItem("Salir", self.quit_app, icon="application-exit"),
+        ]
+        self.tray.set_menu(items)
+
+    def _switch_from_tray(self, name: str) -> None:
+        if self.window is None or name == self.settings.active_profile:
+            return
+        if not self.window.switch_profile(name):
+            notification = Gio.Notification.new("No se pudo cambiar de perfil")
+            notification.set_body("El ratón está dormido o desconectado. Muévelo y vuelve a intentarlo.")
+            self.send_notification("profile-error", notification)
+
+    def _preferences_from_tray(self) -> None:
+        self.show_window()
+        self.show_preferences()
+
+    # -- dialogs ---------------------------------------------------------------
+
+    def show_preferences(self) -> None:
+        dialog = Adw.PreferencesDialog(title="Preferencias")
+        page = Adw.PreferencesPage()
+        dialog.add(page)
+
+        def switch(group, title, subtitle, attr):
+            row = Adw.SwitchRow(title=title, subtitle=subtitle, active=getattr(self.settings, attr))
+            row.connect("notify::active", lambda r, _p: self._set_setting(attr, r.get_active()))
+            group.add(row)
+            return row
+
+        behaviour = Adw.PreferencesGroup(title="Comportamiento")
+        tray_row = switch(behaviour, "Minimizar a la bandeja al cerrar",
+                          "La app sigue en la bandeja vigilando la batería", "close_to_tray")
+        switch(behaviour, "Iniciar con la sesión", "Arranca al entrar en el escritorio", "autostart")
+        switch(behaviour, "Iniciar oculto en la bandeja", "No abre la ventana al arrancar", "start_hidden")
+        if self.tray is None:
+            tray_row.set_sensitive(False)
+            tray_row.set_subtitle("No hay bandeja del sistema disponible")
+        page.add(behaviour)
+
+        battery = Adw.PreferencesGroup(title="Batería")
+        switch(battery, "Avisar con batería baja", "Muestra una notificación y cambia el icono de la bandeja",
+               "low_battery_notify")
+        threshold = Adw.SpinRow.new_with_range(5, 50, 5)
+        threshold.set_title("Umbral de batería baja (%)")
+        threshold.set_value(self.settings.low_battery_threshold)
+        threshold.connect("notify::value", lambda r, _p: self._set_setting("low_battery_threshold", int(r.get_value())))
+        battery.add(threshold)
+        page.add(battery)
+
+        dialog.present(self.window)
+
+    def _set_setting(self, attr: str, value) -> None:
+        setattr(self.settings, attr, value)
+        self.settings.save()
+        if attr.startswith("low_battery"):
+            self._low_battery_notified = False
+            if self.battery is not None:
+                self.update_battery(self.battery)
+
+    def show_about(self) -> None:
+        about = Adw.AboutDialog(
+            application_name=APP_NAME,
+            application_icon="input-mouse",
+            developer_name="blzkz",
+            version=__version__,
+            comments=(
+                "Panel de control de código abierto para el ratón Royal Kludge MG5 en Linux: "
+                "DPI, sondeo, sensor, energía, botones y perfiles."
+            ),
+            license_type=Gtk.License.GPL_3_0,
+            copyright="© 2026 blzkz",
+            developers=["blzkz", "Claude (Anthropic)"],
+        )
+        about.add_legal_section(
+            "Marcas",
+            None,
+            Gtk.License.CUSTOM,
+            "Royal Kludge y MG5 son marcas de sus respectivos propietarios. "
+            "Este proyecto no está afiliado ni respaldado por Royal Kludge.",
+        )
+        about.add_legal_section(
+            "Protocolo",
+            None,
+            Gtk.License.CUSTOM,
+            "El protocolo HID se ha documentado a partir del configurador web oficial y de pruebas "
+            "con el propio ratón, con fines de interoperabilidad.",
+        )
+        about.add_credit_section("Tecnologías", ["GTK 4", "libadwaita", "PyGObject"])
+        about.present(self.window)
 
 
 def main() -> int:
-    return Application().run(sys.argv)
+    argv = [arg for arg in sys.argv if arg != "--hidden"]
+    return Application(start_hidden="--hidden" in sys.argv).run(argv)
