@@ -1,4 +1,4 @@
-"""GTK4 / libadwaita control panel for the Royal Kludge MG5."""
+"""GTK4 / libadwaita control panel for the Royal Kludge MG5, laid out like Synapse / G Hub."""
 
 import sys
 
@@ -9,28 +9,48 @@ gi.require_version("Adw", "1")
 gi.require_version("Gdk", "4.0")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
+from . import actions as a  # noqa: E402
 from . import protocol as p  # noqa: E402
+from .mouse_view import MouseView  # noqa: E402
 
 APP_ID = "io.github.blzkz.OpenRkMg5"
 UDEV_RULE = 'SUBSYSTEM=="hidraw", ATTRS{idVendor}=="372e", ATTRS{idProduct}=="103f|1073", TAG+="uaccess"'
 BATTERY_POLL_SECONDS = 60
 DPI_APPLY_DELAY_MS = 500
 OFFLINE_RETRY_SECONDS = 3
+PANEL_WIDTH = 400
 
-PERF_FLAGS = [
-    (p.PERF_MOTION_SYNC, "Motion Sync", "Sincroniza los informes del sensor con el polling"),
-    (p.PERF_RIPPLE_CONTROL, "Ripple Control", "Suaviza el movimiento a DPI altos"),
-    (p.PERF_ANGLE_SNAPPING, "Corrección de ángulo", "Endereza las líneas horizontales y verticales"),
-    (p.PERF_GLASS_MODE, "Modo cristal", "Optimiza el sensor para superficies de cristal"),
-]
+CSS = """
+@define-color accent_bg_color #2ec5b5;
+@define-color accent_color #4fd8c9;
+@define-color accent_fg_color #08130f;
+@define-color window_bg_color #0f1011;
+@define-color view_bg_color #0f1011;
+@define-color headerbar_bg_color #0b0c0d;
+@define-color card_bg_color #202224;
 
-
-def _sleep_label(seconds: int) -> str:
-    if seconds == 0:
-        return "Desactivado"
-    if seconds < 60:
-        return f"{seconds} s"
-    return f"{seconds // 60} min"
+.main-area { background-color: #0f1011; }
+.side-panel { background-color: #18191b; border-radius: 14px; }
+.panel-title { font-size: 20px; font-weight: 800; letter-spacing: 2px; }
+.panel-subtitle { color: alpha(white, 0.55); }
+.section-label { font-size: 11px; font-weight: 800; letter-spacing: 1.5px; color: alpha(white, 0.5); }
+.device-title { font-weight: 800; letter-spacing: 2px; }
+.device-subtitle { font-size: 11px; color: alpha(white, 0.55); }
+.tabbar { padding: 6px 12px 10px 12px; background-color: #0b0c0d; }
+.tab { border-radius: 999px; padding: 4px 18px; font-weight: 800; letter-spacing: 1px; font-size: 12px;
+       background: none; box-shadow: none; color: alpha(white, 0.7); }
+.tab:hover { color: white; background-color: alpha(white, 0.06); }
+.tab:checked { background-color: @accent_bg_color; color: @accent_fg_color; }
+.segment { font-weight: 700; padding: 6px 4px; }
+.segment:checked { background-color: @accent_bg_color; color: @accent_fg_color; }
+.mouse-stage { background-image: radial-gradient(circle, alpha(white, 0.08) 1px, transparent 1.6px);
+               background-size: 20px 20px; border-radius: 14px; }
+.callout { background: none; box-shadow: none; color: alpha(white, 0.85); font-weight: 600; padding: 4px 8px; }
+.callout:hover, .callout.selected { color: @accent_color; background: none; }
+.action-row.current { background-color: alpha(@accent_bg_color, 0.14); }
+.battery { font-weight: 700; }
+.big-value { font-size: 34px; font-weight: 800; }
+"""
 
 
 def _rgba(rgb: tuple[int, int, int]) -> Gdk.RGBA:
@@ -41,6 +61,44 @@ def _rgba(rgb: tuple[int, int, int]) -> Gdk.RGBA:
 
 def _rgb(color: Gdk.RGBA) -> tuple[int, int, int]:
     return tuple(round(c * 255) for c in (color.red, color.green, color.blue))
+
+
+def _sleep_label(seconds: int) -> str:
+    if seconds == 0:
+        return "Desactivado"
+    return f"{seconds} s" if seconds < 60 else f"{seconds // 60} min"
+
+
+def _label(text: str, css: str, **kwargs) -> Gtk.Label:
+    return Gtk.Label(label=text, xalign=0, css_classes=[css], wrap=True, **kwargs)
+
+
+class Segmented(Gtk.Box):
+    """Row of linked toggle buttons, one per option."""
+
+    def __init__(self, labels: list[str], on_selected):
+        super().__init__(css_classes=["linked"], homogeneous=True)
+        self.buttons: list[Gtk.ToggleButton] = []
+        self.loading = False
+        for i, text in enumerate(labels):
+            button = Gtk.ToggleButton(label=text, css_classes=["segment"])
+            if self.buttons:
+                button.set_group(self.buttons[0])
+            button.connect("toggled", self._on_toggled, i, on_selected)
+            self.append(button)
+            self.buttons.append(button)
+
+    def set_selected(self, index: int) -> None:
+        self.loading = True
+        try:
+            if 0 <= index < len(self.buttons):
+                self.buttons[index].set_active(True)
+        finally:
+            self.loading = False
+
+    def _on_toggled(self, button, index, on_selected) -> None:
+        if button.get_active() and not self.loading:
+            on_selected(index)
 
 
 class DpiLevelRow(Adw.ActionRow):
@@ -57,14 +115,14 @@ class DpiLevelRow(Adw.ActionRow):
         self.add_prefix(self.radio)
         self.set_activatable_widget(self.radio)
 
+        self.color = Gtk.ColorDialogButton(dialog=Gtk.ColorDialog(with_alpha=False), valign=Gtk.Align.CENTER)
+        self.color.connect("notify::rgba", self._on_color_changed)
+        self.add_suffix(self.color)
+
         adjustment = Gtk.Adjustment(lower=p.DPI_MIN, upper=p.DPI_MAX, step_increment=p.DPI_STEP, page_increment=1000)
         self.spin = Gtk.SpinButton(adjustment=adjustment, numeric=True, valign=Gtk.Align.CENTER, width_chars=6)
         self.spin.connect("value-changed", self._on_dpi_changed)
         self.add_suffix(self.spin)
-
-        self.color = Gtk.ColorDialogButton(dialog=Gtk.ColorDialog(with_alpha=False), valign=Gtk.Align.CENTER)
-        self.color.connect("notify::rgba", self._on_color_changed)
-        self.add_suffix(self.color)
 
     def load(self, config: p.Config) -> None:
         self.spin.set_value(config.dpi(self.level))
@@ -106,113 +164,242 @@ class DpiLevelRow(Adw.ActionRow):
 
 class MainWindow(Adw.ApplicationWindow):
     def __init__(self, app: Adw.Application):
-        super().__init__(application=app, title="Panel RK MG5", default_width=560, default_height=820)
+        super().__init__(application=app, title="Panel RK MG5", default_width=1180, default_height=780)
         self.mouse: p.MG5 | None = None
         self.config: p.Config | None = None
+        self.keys: list[int] = list(a.DEFAULT_KEYS)
+        self.selected_button = 1
+        self.capturing_key = False
         self.loading = False
         self._event_source = 0
         self._retry_source = 0
 
         self.toasts = Adw.ToastOverlay()
         toolbar = Adw.ToolbarView()
-        header = Adw.HeaderBar()
-        refresh = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text="Volver a leer el ratón")
-        refresh.connect("clicked", lambda *_: self.connect_mouse())
-        header.pack_start(refresh)
-        toolbar.add_top_bar(header)
+        toolbar.add_top_bar(self._build_header())
+        toolbar.add_top_bar(self._build_tabbar())
         self.toasts.set_child(toolbar)
         self.set_content(self.toasts)
 
         self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE)
         toolbar.set_content(self.stack)
+        self.stack.add_named(self._build_status_page(), "status")
+        self.stack.add_named(self._build_main(), "settings")
 
-        self.status = Adw.StatusPage(icon_name="input-mouse-symbolic")
-        retry = Gtk.Button(label="Reintentar", halign=Gtk.Align.CENTER, css_classes=["pill", "suggested-action"])
-        retry.connect("clicked", lambda *_: self.connect_mouse())
-        self.status_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
-        self.rule_label = Gtk.Label(selectable=True, wrap=True, css_classes=["monospace"], visible=False)
-        self.status_box.append(self.rule_label)
-        self.status_box.append(retry)
-        self.status.set_child(self.status_box)
-        self.stack.add_named(self.status, "status")
-
-        self.stack.add_named(self._build_settings(), "settings")
+        key_capture = Gtk.EventControllerKey(propagation_phase=Gtk.PropagationPhase.CAPTURE)
+        key_capture.connect("key-pressed", self._on_key_pressed)
+        self.add_controller(key_capture)
 
         self.connect("close-request", self._on_close)
         GLib.timeout_add_seconds(BATTERY_POLL_SECONDS, self._poll_battery)
+        self._select_tab("customize")
         self.connect_mouse()
 
     # -- UI construction -------------------------------------------------------
 
-    def _build_settings(self) -> Gtk.Widget:
-        page = Adw.PreferencesPage()
+    def _build_header(self) -> Gtk.Widget:
+        header = Adw.HeaderBar()
+        title_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER)
+        title_box.append(Gtk.Label(label="ROYAL KLUDGE MG5", css_classes=["device-title"]))
+        self.connection_label = Gtk.Label(label="Buscando ratón…", css_classes=["device-subtitle"])
+        title_box.append(self.connection_label)
+        header.set_title_widget(title_box)
 
-        state = Adw.PreferencesGroup(title="Estado")
-        self.connection_row = Adw.ActionRow(title="Conexión")
-        state.add(self.connection_row)
-        self.battery_row = Adw.ActionRow(title="Batería")
-        self.battery_bar = Gtk.LevelBar(min_value=0, max_value=100, valign=Gtk.Align.CENTER, width_request=140)
-        self.battery_row.add_suffix(self.battery_bar)
-        state.add(self.battery_row)
-        page.add(state)
+        refresh = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text="Volver a leer el ratón")
+        refresh.connect("clicked", lambda *_: self.connect_mouse())
+        header.pack_start(refresh)
 
-        dpi = Adw.PreferencesGroup(title="DPI", description="El nivel marcado es el que está en uso")
+        battery = Gtk.Box(spacing=6, css_classes=["battery"])
+        self.battery_icon = Gtk.Image(icon_name="battery-missing-symbolic")
+        self.battery_label = Gtk.Label(label="—")
+        battery.append(self.battery_label)
+        battery.append(self.battery_icon)
+        header.pack_end(battery)
+        return header
+
+    def _build_tabbar(self) -> Gtk.Widget:
+        bar = Gtk.Box(spacing=6, halign=Gtk.Align.CENTER, css_classes=["tabbar"])
+        self.tabs: dict[str, Gtk.ToggleButton] = {}
+        first = None
+        for name, label in (("customize", "PERSONALIZAR"), ("performance", "RENDIMIENTO"),
+                            ("sensor", "SENSOR"), ("power", "ENERGÍA")):
+            tab = Gtk.ToggleButton(label=label, css_classes=["tab"])
+            if first is not None:
+                tab.set_group(first)
+            first = first or tab
+            tab.connect("toggled", lambda t, n=name: t.get_active() and self._select_tab(n))
+            bar.append(tab)
+            self.tabs[name] = tab
+        box = Gtk.Box(css_classes=["tabbar"])
+        box.append(Gtk.Box(hexpand=True))
+        box.append(bar)
+        box.append(Gtk.Box(hexpand=True))
+        return box
+
+    def _build_status_page(self) -> Gtk.Widget:
+        self.status = Adw.StatusPage(icon_name="input-mouse-symbolic")
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+        self.rule_label = Gtk.Label(selectable=True, wrap=True, css_classes=["monospace"], visible=False)
+        box.append(self.rule_label)
+        retry = Gtk.Button(label="Reintentar", halign=Gtk.Align.CENTER, css_classes=["pill", "suggested-action"])
+        retry.connect("clicked", lambda *_: self.connect_mouse())
+        box.append(retry)
+        self.status.set_child(box)
+        return self.status
+
+    def _build_main(self) -> Gtk.Widget:
+        main = Gtk.Box(spacing=16, css_classes=["main-area"])
+        for side in ("start", "end", "top", "bottom"):
+            getattr(main, f"set_margin_{side}")(16)
+
+        self.panels = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE, vhomogeneous=False)
+        self.panels.add_named(self._panel_customize(), "customize")
+        self.panels.add_named(self._panel_performance(), "performance")
+        self.panels.add_named(self._panel_sensor(), "sensor")
+        self.panels.add_named(self._panel_power(), "power")
+        scroller = Gtk.ScrolledWindow(child=self.panels, hscrollbar_policy=Gtk.PolicyType.NEVER,
+                                      width_request=PANEL_WIDTH, css_classes=["side-panel"])
+        main.append(scroller)
+
+        self.mouse_view = MouseView()
+        self.mouse_view.connect("button-selected", lambda _v, i: self._select_button(i))
+        main.append(self.mouse_view)
+        return main
+
+    def _panel_box(self, title: str, subtitle: str) -> Gtk.Box:
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        for side in ("start", "end", "top", "bottom"):
+            getattr(box, f"set_margin_{side}")(22)
+        box.append(_label(title, "panel-title"))
+        box.append(_label(subtitle, "panel-subtitle"))
+        return box
+
+    def _panel_customize(self) -> Gtk.Widget:
+        box = self._panel_box("PERSONALIZAR", "Haz clic en un botón del dibujo para cambiar lo que hace.")
+        self.button_title = _label("", "section-label", margin_top=8)
+        box.append(self.button_title)
+
+        self.action_rows: dict[int, Adw.ActionRow] = {}
+        group_name = None
+        listbox = None
+        for action in a.ACTIONS:
+            if action.group != group_name:
+                group_name = action.group
+                box.append(_label(group_name.upper(), "section-label", margin_top=6))
+                listbox = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE, css_classes=["boxed-list"])
+                listbox.connect("row-activated", lambda _l, row: self._assign(row.raw))
+                box.append(listbox)
+            row = Adw.ActionRow(title=action.name, activatable=True, css_classes=["action-row"])
+            row.raw = action.raw
+            check = Gtk.Image(icon_name="object-select-symbolic", visible=False)
+            row.add_suffix(check)
+            row.check = check
+            listbox.append(row)
+            self.action_rows[action.raw] = row
+
+        box.append(_label("TECLADO", "section-label", margin_top=6))
+        keyboard = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE, css_classes=["boxed-list"])
+        self.key_row = Adw.ActionRow(title="Tecla o combinación", subtitle="Asigna una tecla, con Ctrl/Mayús/Alt si quieres")
+        self.key_button = Gtk.Button(label="Pulsa para grabar", valign=Gtk.Align.CENTER)
+        self.key_button.connect("clicked", lambda *_: self._start_key_capture())
+        self.key_row.add_suffix(self.key_button)
+        keyboard.append(self.key_row)
+        box.append(keyboard)
+
+        reset = Gtk.Button(label="Restaurar este botón", halign=Gtk.Align.START, css_classes=["flat"], margin_top=6)
+        reset.connect("clicked", lambda *_: self._assign(a.DEFAULT_KEYS[self.selected_button]))
+        box.append(reset)
+        return box
+
+    def _panel_performance(self) -> Gtk.Widget:
+        box = self._panel_box("RENDIMIENTO", "Niveles de sensibilidad que recorre el botón DPI y tasa de sondeo.")
+
+        box.append(_label("SENSIBILIDAD (DPI)", "section-label", margin_top=8))
+        dpi_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE, css_classes=["boxed-list"])
         self.level_count_row = Adw.SpinRow.new_with_range(1, p.DPI_LEVELS, 1)
         self.level_count_row.set_title("Número de niveles")
-        self.level_count_row.set_subtitle("Niveles que recorre el botón DPI")
         self.level_count_row.connect("notify::value", self._on_level_count_changed)
-        dpi.add(self.level_count_row)
+        dpi_list.append(self.level_count_row)
         self.level_rows: list[DpiLevelRow] = []
         group = None
         for level in range(1, p.DPI_LEVELS + 1):
             row = DpiLevelRow(self, level, group)
             group = group or row.radio
             self.level_rows.append(row)
-            dpi.add(row)
-        page.add(dpi)
+            dpi_list.append(row)
+        box.append(dpi_list)
 
-        sensor = Adw.PreferencesGroup(title="Sensor")
+        box.append(_label("TASA DE SONDEO (Hz)", "section-label", margin_top=8))
         self.rates = sorted(p.REPORT_RATES)
-        self.rate_row = self._combo_row(sensor, "Frecuencia de sondeo", [f"{hz} Hz" for hz in self.rates],
-                                        lambda i: lambda m, c: m.set_report_rate(self.rates[i]))
-        self.rate_row.set_subtitle("Las frecuencias por encima de 1000 Hz consumen más batería")
+        self.rate_segments = Segmented([str(hz) for hz in self.rates],
+                                       lambda i: self.apply(lambda m, c: m.set_report_rate(self.rates[i])))
+        box.append(self.rate_segments)
+        box.append(_label("Por encima de 1000 Hz el ratón gasta bastante más batería.", "panel-subtitle"))
+        return box
+
+    def _panel_sensor(self) -> Gtk.Widget:
+        box = self._panel_box("SENSOR", "Ajustes del sensor óptico y de los clics.")
+
+        box.append(_label("DISTANCIA DE LEVANTAMIENTO (LOD)", "section-label", margin_top=8))
         self.lods = list(p.LOD_HEIGHTS)
-        self.lod_row = self._combo_row(sensor, "Distancia de levantamiento (LOD)", list(p.LOD_HEIGHTS.values()),
-                                       lambda i: lambda m, c: m.set_lod(self.lods[i]))
+        self.lod_segments = Segmented(list(p.LOD_HEIGHTS.values()),
+                                      lambda i: self.apply(lambda m, c: m.set_lod(self.lods[i])))
+        box.append(self.lod_segments)
+
+        box.append(_label("MODO DEL SENSOR", "section-label", margin_top=8))
         self.modes = list(p.SENSOR_MODES)
-        self.mode_row = self._combo_row(sensor, "Modo del sensor", list(p.SENSOR_MODES.values()),
-                                        lambda i: lambda m, c: m.set_performance(c.performance & 0x3F | self.modes[i] << 6))
+        self.mode_segments = Segmented(
+            ["Oficina", "Rendimiento", "Competitivo"],
+            lambda i: self.apply(lambda m, c: m.set_performance(c.performance & 0x3F | self.modes[i] << 6)),
+        )
+        box.append(self.mode_segments)
+
+        box.append(_label("AJUSTES", "section-label", margin_top=8))
+        options = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE, css_classes=["boxed-list"])
         self.debounce_row = Adw.SpinRow.new_with_range(1, 20, 1)
-        self.debounce_row.set_title("Debounce")
-        self.debounce_row.set_subtitle("Milisegundos de filtrado de los clics")
+        self.debounce_row.set_title("Debounce (ms)")
+        self.debounce_row.set_subtitle("Filtrado de rebotes de los clics")
         self.debounce_row.connect("notify::value", self._on_debounce_changed)
-        sensor.add(self.debounce_row)
+        options.append(self.debounce_row)
         self.flag_rows = []
-        for mask, title, subtitle in PERF_FLAGS:
+        for mask, title, subtitle in (
+            (p.PERF_MOTION_SYNC, "Motion Sync", "Sincroniza el sensor con el sondeo"),
+            (p.PERF_RIPPLE_CONTROL, "Ripple Control", "Suaviza el movimiento a DPI altos"),
+            (p.PERF_ANGLE_SNAPPING, "Corrección de ángulo", "Endereza las líneas rectas"),
+            (p.PERF_GLASS_MODE, "Modo cristal", "Para superficies de cristal"),
+        ):
             row = Adw.SwitchRow(title=title, subtitle=subtitle)
             row.connect("notify::active", self._on_flag_changed, mask)
-            sensor.add(row)
+            options.append(row)
             self.flag_rows.append((mask, row))
-        page.add(sensor)
+        box.append(options)
+        return box
 
-        power = Adw.PreferencesGroup(title="Energía")
+    def _panel_power(self) -> Gtk.Widget:
+        box = self._panel_box("ENERGÍA", "Batería y reposo del ratón.")
+        box.append(_label("BATERÍA", "section-label", margin_top=8))
+        self.battery_big = Gtk.Label(label="—", xalign=0, css_classes=["big-value"])
+        box.append(self.battery_big)
+        self.battery_bar = Gtk.LevelBar(min_value=0, max_value=100)
+        box.append(self.battery_bar)
+        self.battery_state = _label("", "panel-subtitle")
+        box.append(self.battery_state)
+
+        box.append(_label("REPOSO", "section-label", margin_top=12))
+        power = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE, css_classes=["boxed-list"])
         self.sleep_times = p.SLEEP_TIMES
-        self.sleep_row = self._combo_row(power, "Reposo tras inactividad", [_sleep_label(s) for s in self.sleep_times],
-                                         lambda i: lambda m, c: m.set_sleep(self.sleep_times[i]))
-        page.add(power)
+        self.sleep_row = Adw.ComboRow(title="Dormir tras inactividad",
+                                      model=Gtk.StringList.new([_sleep_label(s) for s in self.sleep_times]))
+        self.sleep_row.connect("notify::selected", self._on_sleep_changed)
+        power.append(self.sleep_row)
+        box.append(power)
+        return box
 
-        return page
-
-    def _combo_row(self, group, title, labels, make_write) -> Adw.ComboRow:
-        row = Adw.ComboRow(title=title, model=Gtk.StringList.new(labels))
-
-        def on_selected(r, _pspec):
-            if not self.loading:
-                self.apply(make_write(r.get_selected()))
-
-        row.connect("notify::selected", on_selected)
-        group.add(row)
-        return row
+    def _select_tab(self, name: str) -> None:
+        self.tabs[name].set_active(True)
+        self.panels.set_visible_child_name(name)
+        self.mouse_view.set_callouts_visible(name == "customize")
+        self._update_badge()
 
     # -- device lifecycle ------------------------------------------------------
 
@@ -224,6 +411,7 @@ class MainWindow(Adw.ApplicationWindow):
             if self.mouse.info.wireless and not self.mouse.is_online(timeout=0.3):
                 raise p.MouseOffline()
             self.config = self.mouse.read_config()
+            self.keys = self.mouse.read_keys()
             battery = self.mouse.read_battery()
         except p.DeviceNotFound:
             self._show_status("No se encuentra el ratón", "Conecta el receptor 2.4G o el cable del RK MG5.")
@@ -236,7 +424,7 @@ class MainWindow(Adw.ApplicationWindow):
             )
             return
         except p.MouseOffline:
-            self._show_status("El ratón no responde", "Enciéndelo o muévelo para despertarlo.")
+            self._show_status("El ratón está dormido", "Muévelo para despertarlo; el panel se conectará solo.")
             if not self._retry_source:
                 self._retry_source = GLib.timeout_add_seconds(OFFLINE_RETRY_SECONDS, self._retry_offline)
             return
@@ -247,9 +435,10 @@ class MainWindow(Adw.ApplicationWindow):
         self._event_source = GLib.unix_fd_add_full(
             GLib.PRIORITY_DEFAULT, self.mouse.fileno, GLib.IOCondition.IN, self._on_device_event
         )
-        self.connection_row.set_subtitle("Receptor 2.4G" if self.mouse.info.wireless else "Cable USB")
+        self.connection_label.set_label("Receptor 2.4G" if self.mouse.info.wireless else "Cable USB")
         self._show_battery(battery)
         self._load_config()
+        self._load_keys()
         self.stack.set_visible_child_name("settings")
 
     def _retry_offline(self) -> bool:
@@ -272,6 +461,7 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _show_status(self, title: str, description: str, show_rule: bool = False) -> None:
         self._disconnect()
+        self.connection_label.set_label("Sin conexión")
         self.status.set_title(title)
         self.status.set_description(description)
         self.rule_label.set_label(UDEV_RULE)
@@ -288,11 +478,11 @@ class MainWindow(Adw.ApplicationWindow):
             for row in self.level_rows:
                 row.load(c)
                 row.set_visible(row.level <= c.dpi_level_count)
-            self.rate_row.set_selected(self.rates.index(c.report_rate))
+            self.rate_segments.set_selected(self.rates.index(c.report_rate))
             if c.lod in self.lods:
-                self.lod_row.set_selected(self.lods.index(c.lod))
+                self.lod_segments.set_selected(self.lods.index(c.lod))
             if c.sensor_mode in self.modes:
-                self.mode_row.set_selected(self.modes.index(c.sensor_mode))
+                self.mode_segments.set_selected(self.modes.index(c.sensor_mode))
             self.debounce_row.set_value(c.debounce)
             for mask, row in self.flag_rows:
                 row.set_active(c.flag(mask))
@@ -301,21 +491,40 @@ class MainWindow(Adw.ApplicationWindow):
             self.sleep_row.set_selected(nearest)
         finally:
             self.loading = False
+        self._update_badge()
+
+    def _load_keys(self) -> None:
+        self.mouse_view.set_labels({i: a.describe(raw) for i, raw in enumerate(self.keys)})
+        self._select_button(self.selected_button)
+
+    def _update_badge(self) -> None:
+        if self.config is None or self.panels.get_visible_child_name() != "performance":
+            self.mouse_view.set_badge(None)
+            return
+        level = self.config.dpi_level
+        self.mouse_view.set_badge(f"{self.config.dpi(level)} DPI", self.config.dpi_color(level))
 
     def _reload(self) -> bool:
         if self.mouse is not None:
             try:
                 self.config = self.mouse.read_config()
+                self.keys = self.mouse.read_keys()
                 self._show_battery(self.mouse.read_battery())
                 self._load_config()
+                self._load_keys()
             except (p.MG5Error, OSError):
                 pass
         return GLib.SOURCE_REMOVE
 
     def _show_battery(self, battery: p.Battery) -> None:
+        percent = battery.percent
+        level = "full" if percent >= 90 else "good" if percent >= 40 else "low" if percent >= 15 else "caution"
+        charging = "-charging" if battery.charging else ""
+        self.battery_icon.set_from_icon_name(f"battery-{level}{charging}-symbolic")
+        self.battery_label.set_label(f"{battery.percent} %")
+        self.battery_big.set_label(f"{battery.percent} %")
         self.battery_bar.set_value(battery.percent)
-        suffix = " · cargando" if battery.charging else ""
-        self.battery_row.set_subtitle(f"{battery.percent} %{suffix}")
+        self.battery_state.set_label("Cargando" if battery.charging else "Funcionando con batería")
 
     def _poll_battery(self) -> bool:
         if self.mouse is not None:
@@ -350,29 +559,30 @@ class MainWindow(Adw.ApplicationWindow):
 
     # -- writing ---------------------------------------------------------------
 
-    def apply(self, write) -> None:
-        """Runs write(mouse, config), then re-reads the config so the UI shows what the mouse stored."""
+    def apply(self, write) -> bool:
+        """Runs write(mouse, config), then re-reads so the UI shows what the mouse stored."""
         if self.mouse is None or self.config is None:
-            return
+            return False
+        ok = False
         try:
             # Writes sent while the mouse sleeps reach the receiver but not the mouse, and get lost.
             if self.mouse.info.wireless and not self.mouse.is_online(timeout=0.3):
                 raise p.MouseOffline()
             write(self.mouse, self.config)
             self.config = self.mouse.read_config()
+            ok = True
         except p.MouseOffline:
             self.toast("El ratón está dormido: muévelo y vuelve a intentarlo")
         except (p.MG5Error, OSError) as e:
             self.toast(f"Error al guardar: {e}")
         self._load_config()
+        return ok
 
     def _on_level_count_changed(self, row, _pspec) -> None:
         if self.loading:
             return
         count = int(row.get_value())
         self.apply(lambda m, c: m.set_dpi_level_count(c, count))
-        for level_row in self.level_rows:
-            level_row.set_visible(level_row.level <= count)
 
     def _on_debounce_changed(self, row, _pspec) -> None:
         if not self.loading:
@@ -385,6 +595,71 @@ class MainWindow(Adw.ApplicationWindow):
         enabled = row.get_active()
         self.apply(lambda m, c: m.set_performance(c.performance | mask if enabled else c.performance & ~mask))
 
+    def _on_sleep_changed(self, row, _pspec) -> None:
+        if not self.loading:
+            seconds = self.sleep_times[row.get_selected()]
+            self.apply(lambda m, c: m.set_sleep(seconds))
+
+    # -- button remapping ------------------------------------------------------
+
+    def _select_button(self, index: int) -> None:
+        self.selected_button = index
+        self.mouse_view.set_selected(index)
+        current = self.keys[index]
+        self.button_title.set_label(f"{a.BUTTON_NAMES[index].upper()} · {a.describe(current)}")
+        for raw, row in self.action_rows.items():
+            row.check.set_visible(raw == current)
+            if raw == current:
+                row.add_css_class("current")
+            else:
+                row.remove_css_class("current")
+        is_key = current >> 24 == 0 and current != a.DISABLED
+        self.key_row.set_subtitle(a.describe(current) if is_key else "Asigna una tecla, con Ctrl/Mayús/Alt si quieres")
+        self._stop_key_capture()
+
+    def _assign(self, raw: int) -> None:
+        index = self.selected_button
+        # Never leave the mouse without a left click.
+        if raw != a.LEFT_CLICK and self.keys[index] == a.LEFT_CLICK and self.keys.count(a.LEFT_CLICK) == 1:
+            self.toast("Asigna antes el clic izquierdo a otro botón")
+            return
+        if self.apply(lambda m, c: m.set_key(index, raw)):
+            try:
+                self.keys = self.mouse.read_keys()
+            except (p.MG5Error, OSError):
+                self.keys[index] = raw
+        self._load_keys()
+
+    def _start_key_capture(self) -> None:
+        self.capturing_key = True
+        self.key_button.set_label("Pulsa una tecla…")
+        self.key_button.add_css_class("suggested-action")
+
+    def _stop_key_capture(self) -> None:
+        self.capturing_key = False
+        self.key_button.set_label("Pulsa para grabar")
+        self.key_button.remove_css_class("suggested-action")
+
+    def _on_key_pressed(self, _controller, _keyval, keycode, state) -> bool:
+        if not self.capturing_key:
+            return False
+        mods = 0
+        if state & Gdk.ModifierType.CONTROL_MASK:
+            mods |= 0x01
+        if state & Gdk.ModifierType.SHIFT_MASK:
+            mods |= 0x02
+        if state & Gdk.ModifierType.ALT_MASK:
+            mods |= 0x04
+        if state & Gdk.ModifierType.SUPER_MASK:
+            mods |= 0x08
+        raw = a.key_from_evdev(keycode - 8, mods)
+        if raw is None:
+            # Plain modifier press or unsupported key: keep waiting.
+            return True
+        self._stop_key_capture()
+        self._assign(raw)
+        return True
+
     def toast(self, message: str) -> None:
         self.toasts.add_toast(Adw.Toast(title=message))
 
@@ -392,6 +667,15 @@ class MainWindow(Adw.ApplicationWindow):
 class Application(Adw.Application):
     def __init__(self):
         super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
+
+    def do_startup(self):
+        Adw.Application.do_startup(self)
+        Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.FORCE_DARK)
+        provider = Gtk.CssProvider()
+        provider.load_from_string(CSS)
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
 
     def do_activate(self):
         window = self.get_active_window() or MainWindow(self)

@@ -63,7 +63,6 @@ PERF_GLASS_MODE = 0x02
 PERF_RIPPLE_CONTROL = 0x10
 PERF_MOTION_SYNC = 0x20
 
-BUTTON_NAMES = ["Izquierdo", "Derecho", "Central", "Adelante", "Atrás", "DPI"]
 
 
 class MG5Error(Exception):
@@ -269,6 +268,10 @@ class MG5:
 
     def set_sleep(self, seconds: int) -> None:
         self.write_config(OFF_SLEEP, bytes([seconds // 30]))
+
+    def set_key(self, index: int, raw: int) -> None:
+        """Assigns an action (see actions.py) to button `index` (0..5)."""
+        self._transact(CMD_SET_KEY, 32, index * 4, raw.to_bytes(4, "big"))
 
     def set_dpi_value(self, level: int, dpi: int) -> None:
         offset = OFF_DPI_VALUES + (level - 1) * 2

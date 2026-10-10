@@ -1,12 +1,14 @@
 # Open RK MG5 Control Panel
 
 Panel de control para Linux del ratón **Royal Kludge MG5**: DPI por niveles, colores, frecuencia de sondeo,
-LOD, debounce, modo del sensor, Motion Sync, Ripple Control, corrección de ángulo, modo cristal y reposo.
+LOD, debounce, modo del sensor, Motion Sync, Ripple Control, corrección de ángulo, modo cristal, reposo
+y reasignación de los seis botones (ratón, DPI, multimedia o cualquier tecla con modificadores).
 
 Funciona con el receptor 2.4G (`372e:103f`) y, en principio, por cable (`372e:1073`, aún sin probar).
 El protocolo está documentado en [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
-![Captura del panel](docs/screenshot.png)
+![Personalizar](docs/screenshot.png)
+![Rendimiento](docs/screenshot-performance.png)
 
 ## Requisitos
 
