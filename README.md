@@ -6,6 +6,8 @@ LOD, debounce, modo del sensor, Motion Sync, Ripple Control, corrección de áng
 Funciona con el receptor 2.4G (`372e:103f`) y, en principio, por cable (`372e:1073`, aún sin probar).
 El protocolo está documentado en [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
+![Captura del panel](docs/screenshot.png)
+
 ## Requisitos
 
 - Python 3.10 o superior

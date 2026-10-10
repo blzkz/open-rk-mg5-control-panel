@@ -355,10 +355,13 @@ class MainWindow(Adw.ApplicationWindow):
         if self.mouse is None or self.config is None:
             return
         try:
+            # Writes sent while the mouse sleeps reach the receiver but not the mouse, and get lost.
+            if self.mouse.info.wireless and not self.mouse.is_online(timeout=0.3):
+                raise p.MouseOffline()
             write(self.mouse, self.config)
             self.config = self.mouse.read_config()
         except p.MouseOffline:
-            self.toast("El ratón no responde; no se ha guardado el cambio")
+            self.toast("El ratón está dormido: muévelo y vuelve a intentarlo")
         except (p.MG5Error, OSError) as e:
             self.toast(f"Error al guardar: {e}")
         self._load_config()

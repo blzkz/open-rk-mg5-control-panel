@@ -114,6 +114,11 @@ Agrupaciones que usa la web con `0x35`:
 - LOD + debounce + flags: sn 50, offset 3, 3 bytes.
 - Reposo: sn 49, offset 8, 1 byte.
 
+## Reposo
+
+Cuando el ratón duerme, `0x47` responde con byte 5 = 0 y las lecturas `0x4F` no responden.
+Las escrituras enviadas en la transición al reposo las acepta el receptor pero se pierden, así que hay que comprobar `0x47` antes de escribir.
+
 ## Eventos (input report 9, 31 bytes)
 
 Byte 0 = `0xFA`. Byte 1 = tipo:
