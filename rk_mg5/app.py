@@ -606,6 +606,9 @@ class MainWindow(Adw.ApplicationWindow):
             if self.mouse.info.wireless and not self.mouse.is_online(timeout=0.3):
                 raise p.MouseOffline()
             write(self.mouse, self.config)
+            # Some changes make the mouse re-link; give it a moment before reading back.
+            if not self.mouse.wait_online():
+                raise p.MouseOffline()
             self.config = self.mouse.read_config()
             self.keys = self.mouse.read_keys()
             ok = True
@@ -701,7 +704,10 @@ class MainWindow(Adw.ApplicationWindow):
         names = self.app.profiles.names
         self.loading = True
         try:
-            self.profile_dropdown.set_model(Gtk.StringList.new(names))
+            model = self.profile_dropdown.get_model()
+            current = [model.get_string(i) for i in range(model.get_n_items())] if model is not None else []
+            if current != names:
+                self.profile_dropdown.set_model(Gtk.StringList.new(names))
             active = self.app.settings.active_profile
             self.profile_dropdown.set_selected(names.index(active) if active in names else Gtk.INVALID_LIST_POSITION)
         finally:
@@ -728,7 +734,7 @@ class MainWindow(Adw.ApplicationWindow):
             return
         index = dropdown.get_selected()
         names = self.app.profiles.names
-        if 0 <= index < len(names):
+        if 0 <= index < len(names) and names[index] != self.app.settings.active_profile:
             self.switch_profile(names[index])
 
     def switch_profile(self, name: str) -> bool:

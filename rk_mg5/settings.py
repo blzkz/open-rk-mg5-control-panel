@@ -141,14 +141,10 @@ class Profile:
             rgb = tuple(int(self.dpi_colors[level - 1][i:i + 2], 16) for i in (1, 3, 5))
             if config.dpi_color(level) != rgb:
                 mouse.set_dpi_color(level, rgb)
-        if config.report_rate != self.report_rate:
-            mouse.set_report_rate(self.report_rate)
         if config.lod != self.lod:
             mouse.set_lod(self.lod)
         if config.debounce != self.debounce:
             mouse.set_debounce(self.debounce)
-        if config.performance != self.performance_byte:
-            mouse.set_performance(self.performance_byte)
         if config.sleep_seconds != self.sleep_seconds:
             mouse.set_sleep(self.sleep_seconds)
         count = max(1, min(p.DPI_LEVELS, self.dpi_level_count))
@@ -157,6 +153,12 @@ class Profile:
             mouse.write_config(p.OFF_DPI_LEVEL, bytes([config.dpi_level << 4 | count]))
         # Selecting the level makes the new DPI value take effect.
         mouse.activate_dpi_level(mouse.read_config(), active)
+        # Polling rate and sensor mode go last: the mouse re-links with the receiver after
+        # either change and stops answering for a moment.
+        if config.report_rate != self.report_rate:
+            mouse.set_report_rate(self.report_rate)
+        if config.performance != self.performance_byte:
+            mouse.set_performance(self.performance_byte)
 
 
 def _profile_path(name: str) -> str:

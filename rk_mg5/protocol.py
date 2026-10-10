@@ -237,6 +237,20 @@ class MG5:
         resp = self._transact(CMD_GET_ONLINE, 1, 0, timeout=timeout)
         return resp[5] == 1
 
+    def wait_online(self, timeout: float = 4.0) -> bool:
+        """Waits for the mouse to answer again, e.g. after a polling-rate or sensor-mode change makes it re-link."""
+        if self.info.product_id != PRODUCT_ID_DONGLE:
+            return True
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                if self.is_online(timeout=0.3):
+                    return True
+            except MouseOffline:
+                pass
+            time.sleep(0.1)
+        return False
+
     def read_battery(self) -> Battery:
         value = self.read_page(REGION_DEVICE, 1)[0]
         return Battery(percent=value & 0x7F, charging=bool(value >> 7))
