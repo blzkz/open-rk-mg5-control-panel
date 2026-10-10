@@ -1,5 +1,6 @@
 """GTK4 / libadwaita control panel for the Royal Kludge MG5, laid out like Synapse / G Hub."""
 
+import os
 import sys
 
 import gi
@@ -846,6 +847,8 @@ class Application(Adw.Application):
 
     def do_startup(self):
         Adw.Application.do_startup(self)
+        install_desktop_integration()
+        Gtk.Window.set_default_icon_name(APP_ID)
         Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.FORCE_DARK)
         provider = Gtk.CssProvider()
         provider.load_from_string(CSS)
@@ -879,9 +882,17 @@ class Application(Adw.Application):
     # -- window / tray ---------------------------------------------------------
 
     def show_window(self) -> None:
-        if self.window is not None:
-            self.window.set_visible(True)
-            self.window.present()
+        if self.window is None:
+            return
+        token = self.tray.take_activation_token() if self.tray is not None else ""
+        if token:
+            # Lets the compositor raise and focus us despite focus-stealing prevention.
+            self.window.set_startup_id(token)
+        elif self.window.get_visible() and not self.window.is_active():
+            # Without a token Wayland won't raise an existing window, but a re-mapped one is shown on top.
+            self.window.set_visible(False)
+        self.window.set_visible(True)
+        self.window.present()
 
     def toggle_window(self) -> None:
         if self.window is not None and self.window.get_visible() and self.window.is_active():
@@ -918,20 +929,20 @@ class Application(Adw.Application):
         battery = self.battery
         low = battery is not None and battery.percent <= self.settings.low_battery_threshold and not battery.charging
         if battery is None:
-            icon, battery_text = "input-mouse", "Batería: desconocida"
+            icon, battery_text = APP_ID, "Batería: desconocida"
         elif battery.charging:
             icon, battery_text = "battery-good-charging", f"Batería: {battery.percent} % (cargando)"
         elif low:
             icon, battery_text = "battery-caution", f"Batería baja: {battery.percent} %"
         else:
-            icon, battery_text = "input-mouse", f"Batería: {battery.percent} %"
+            icon, battery_text = APP_ID, f"Batería: {battery.percent} %"
         self.tray.set_icon(icon)
         self.tray.set_status("NeedsAttention" if low else "Active")
         active = self.settings.active_profile
         self.tray.set_tooltip("RK MG5", f"{battery_text}\nPerfil: {active or '—'}")
 
         items = [
-            MenuItem("Mostrar panel", self.show_window, icon="input-mouse"),
+            MenuItem("Mostrar panel", self.show_window, icon=APP_ID),
             MenuItem(battery_text, enabled=False, icon="battery-caution" if low else "battery-good"),
             MenuItem(separator=True),
             MenuItem("Perfiles", enabled=False),
@@ -1003,7 +1014,7 @@ class Application(Adw.Application):
     def show_about(self) -> None:
         about = Adw.AboutDialog(
             application_name=APP_NAME,
-            application_icon="input-mouse",
+            application_icon=APP_ID,
             developer_name="blzkz",
             version=__version__,
             comments=(
@@ -1030,6 +1041,39 @@ class Application(Adw.Application):
         )
         about.add_credit_section("Tecnologías", ["GTK 4", "libadwaita", "PyGObject"])
         about.present(self.window)
+
+
+def install_desktop_integration() -> None:
+    """When running from a source checkout, installs the .desktop file and icon under ~/.local.
+
+    Wayland compositors pick the taskbar icon by matching the app id to an installed .desktop file.
+    Distribution packages install these system-wide, so this only runs from the source tree.
+    """
+    source_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    data_dir = os.path.join(source_root, "data")
+    if not os.path.isdir(data_dir):
+        return
+    data_home = GLib.get_user_data_dir()
+    icon_src = os.path.join(data_dir, "icons", f"{APP_ID}.svg")
+    icon_dst = os.path.join(data_home, "icons", "hicolor", "scalable", "apps", f"{APP_ID}.svg")
+    desktop_dst = os.path.join(data_home, "applications", f"{APP_ID}.desktop")
+    with open(os.path.join(data_dir, f"{APP_ID}.desktop")) as f:
+        desktop = f.read().replace("Exec=python3 -m rk_mg5", f"Exec=env PYTHONPATH={source_root} {sys.executable} -m rk_mg5")
+    try:
+        with open(icon_src, "rb") as f:
+            icon = f.read()
+        for path, content in ((icon_dst, icon), (desktop_dst, desktop.encode())):
+            try:
+                with open(path, "rb") as f:
+                    if f.read() == content:
+                        continue
+            except OSError:
+                pass
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as f:
+                f.write(content)
+    except OSError:
+        pass
 
 
 def main() -> int:

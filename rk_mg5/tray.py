@@ -28,6 +28,7 @@ SNI_XML = """
     <method name="Activate"><arg name="x" type="i" direction="in"/><arg name="y" type="i" direction="in"/></method>
     <method name="SecondaryActivate"><arg name="x" type="i" direction="in"/><arg name="y" type="i" direction="in"/></method>
     <method name="ContextMenu"><arg name="x" type="i" direction="in"/><arg name="y" type="i" direction="in"/></method>
+    <method name="ProvideXdgActivationToken"><arg name="token" type="s" direction="in"/></method>
     <method name="Scroll"><arg name="delta" type="i" direction="in"/><arg name="orientation" type="s" direction="in"/></method>
     <signal name="NewTitle"/>
     <signal name="NewIcon"/>
@@ -136,6 +137,8 @@ class TrayIcon:
         self.tooltip_title = title
         self.tooltip_text = ""
         self.status = "Active"
+        # Wayland activation token handed over by the tray host right before an activation.
+        self.activation_token = ""
         self.revision = 1
         self.items: dict[int, MenuItem] = {}
         self.root = MenuItem(children=[])
@@ -228,8 +231,14 @@ class TrayIcon:
         }
         return values.get(name)
 
-    def _on_sni_call(self, _conn, _sender, _path, _iface, method, _params, invocation) -> None:
-        if method in ("Activate", "SecondaryActivate"):
+    def take_activation_token(self) -> str:
+        token, self.activation_token = self.activation_token, ""
+        return token
+
+    def _on_sni_call(self, _conn, _sender, _path, _iface, method, params, invocation) -> None:
+        if method == "ProvideXdgActivationToken":
+            (self.activation_token,) = params.unpack()
+        elif method in ("Activate", "SecondaryActivate"):
             GLib.idle_add(self.on_activate)
         invocation.return_value(None)
 
