@@ -1,4 +1,8 @@
-"""Royal Kludge MG5 configuration protocol ("BeiYing" protocol, feature report 3).
+"""Royal Kludge mouse configuration protocols.
+
+- MG5: "BeiYing" protocol, feature report 3 with 63-byte 0x50 frames.
+- M30 (experimental, untested on hardware): feature report 9 with 519-byte frames that read and
+  write the whole 400-byte config block.
 
 See docs/PROTOCOL.md for the reverse-engineered details.
 """
@@ -63,6 +67,47 @@ PERF_GLASS_MODE = 0x02
 PERF_RIPPLE_CONTROL = 0x10
 PERF_MOTION_SYNC = 0x20
 
+
+
+@dataclass(frozen=True)
+class Model:
+    """What each supported mouse offers. The panel adapts its options to this."""
+
+    name: str
+    protocol: str  # "mg5" or "m30"
+    vendor_id: int
+    dongle_pid: int
+    wired_pid: int
+    dpi_min: int
+    dpi_max: int
+    dpi_step: int
+    report_rates: tuple[int, ...]
+    sleep_times: tuple[int, ...]
+    debounce_max: int
+    battery: bool
+    sensor_mode: bool
+    glass_mode: bool
+    key_remap: bool
+    experimental: bool = False
+
+    @property
+    def product_ids(self) -> tuple[int, int]:
+        return (self.dongle_pid, self.wired_pid)
+
+
+MG5_MODEL = Model(
+    name="RK MG5", protocol="mg5", vendor_id=VENDOR_ID, dongle_pid=PRODUCT_ID_DONGLE, wired_pid=PRODUCT_ID_WIRED,
+    dpi_min=DPI_MIN, dpi_max=DPI_MAX, dpi_step=DPI_STEP, report_rates=tuple(sorted(REPORT_RATES)),
+    sleep_times=tuple(SLEEP_TIMES), debounce_max=20, battery=True, sensor_mode=True, glass_mode=True, key_remap=True,
+)
+# From the official web configurator (assets/index-BSYKKems.js). Nobody has tested it on a real M30 yet.
+M30_MODEL = Model(
+    name="RK M30", protocol="m30", vendor_id=0x258A, dongle_pid=0x0138, wired_pid=0x0136,
+    dpi_min=100, dpi_max=24000, dpi_step=100, report_rates=(125, 250, 500, 1000),
+    sleep_times=(0, 60, 120, 180, 300, 600, 900, 1800, 3600), debounce_max=15,
+    battery=False, sensor_mode=False, glass_mode=False, key_remap=False, experimental=True,
+)
+MODELS = (MG5_MODEL, M30_MODEL)
 
 
 class MG5Error(Exception):
@@ -152,20 +197,36 @@ class Event:
 class DeviceInfo:
     path: str
     product_id: int
+    model: Model = MG5_MODEL
 
     @property
     def wireless(self) -> bool:
-        return self.product_id == PRODUCT_ID_DONGLE
+        return self.product_id == self.model.dongle_pid
 
 
-def find_device() -> DeviceInfo:
+def _is_config_interface(model: Model, descriptor: bytes) -> bool:
+    if model.protocol == "m30":
+        # 0x258A is a generic SinoWealth vendor id: also require the vendor page and feature report 9.
+        return b"\x06\x00\xff" in descriptor and b"\x85\x09" in descriptor
+    # Config interface: vendor usage page 0xFF00.
+    return descriptor[:3] == b"\x06\x00\xff"
+
+
+def find_device(models: tuple[Model, ...] = MODELS) -> DeviceInfo:
     for dev in enumerate_hidraw():
-        if dev.vendor_id != VENDOR_ID or dev.product_id not in PRODUCT_IDS:
-            continue
-        # Config interface: vendor usage page 0xFF00.
-        if dev.report_descriptor[:3] == b"\x06\x00\xff":
-            return DeviceInfo(dev.path, dev.product_id)
-    raise DeviceNotFound("No se encuentra el RK MG5 (ni receptor ni cable)")
+        for model in models:
+            if dev.vendor_id != model.vendor_id or dev.product_id not in model.product_ids:
+                continue
+            if _is_config_interface(model, dev.report_descriptor):
+                return DeviceInfo(dev.path, dev.product_id, model)
+    names = " / ".join(m.name for m in models)
+    raise DeviceNotFound(f"No se encuentra el {names} (ni receptor ni cable)")
+
+
+def open_device(info: DeviceInfo | None = None) -> "MG5 | M30":
+    """Opens whichever supported mouse is connected, with the backend for its protocol."""
+    info = info or find_device()
+    return M30(info) if info.model.protocol == "m30" else MG5(info)
 
 
 def build_frame(cmd: int, sn: int, offset: int, payload: bytes = b"") -> bytes:
@@ -182,8 +243,12 @@ def build_frame(cmd: int, sn: int, offset: int, payload: bytes = b"") -> bytes:
 
 class MG5:
     def __init__(self, info: DeviceInfo | None = None):
-        self.info = info or find_device()
+        self.info = info or find_device((MG5_MODEL,))
         self.dev = Hidraw(self.info.path)
+
+    @property
+    def model(self) -> Model:
+        return self.info.model
 
     def close(self) -> None:
         self.dev.close()
@@ -298,6 +363,10 @@ class MG5:
         active = min(config.dpi_level, count)
         self.write_config(OFF_DPI_LEVEL, bytes([active << 4 | count]))
 
+    def set_dpi_level_raw(self, value: int) -> None:
+        """Writes the DPI level byte as is: active level in bits 7-4, level count in bits 3-0."""
+        self.write_config(OFF_DPI_LEVEL, bytes([value]))
+
     def activate_dpi_level(self, config: Config, level: int) -> None:
         """Switches the active DPI level the same way the official app does."""
         payload = bytearray(6)
@@ -322,3 +391,284 @@ class MG5:
             elif kind == 5:
                 events.append(Event("battery", Battery(value & 0x7F, bool(value >> 7))))
         return events
+
+
+# -- RK M30 (experimental) ---------------------------------------------------------
+#
+# Taken from the official web configurator (assets/index-BSYKKems.js, class "_ye"); never tested
+# on a real M30. Every write reads the device's current 400-byte block, changes only the bytes of
+# the setting, writes the block back and reads it again to check that the mouse stored it.
+
+M30_REPORT_ID = 9
+M30_FRAME_LEN = 519
+M30_PAYLOAD_OFFSET = 7
+M30_CONFIG_LEN = 400
+
+M30_CMD_SET_CONFIG = 0x04
+M30_CMD_GET_CONFIG = 0x44
+M30_CMD_FW_VERSION = 0x48
+
+# Config block offsets.
+M30_OFF_REPORT_RATE = 2
+M30_OFF_DPI_LEVEL = 3
+M30_OFF_LOD = 4
+M30_OFF_DEBOUNCE = 5  # bits 3-0; bit 7 = motion sync
+M30_OFF_FLAGS = 6  # bit 0 = angle snapping, bit 7 = ripple control
+M30_OFF_DPI_X = 7
+M30_OFF_DPI_Y = 27
+M30_OFF_DPI_COLORS = 47
+M30_OFF_SLEEP = 74  # minutes
+
+M30_REPORT_RATES = {125: 1, 250: 2, 500: 3, 1000: 4}
+M30_REPORT_RATE_BY_ID = {v: k for k, v in M30_REPORT_RATES.items()}
+
+
+def encode_m30_dpi(dpi: int) -> int:
+    dpi = max(M30_MODEL.dpi_min, min(M30_MODEL.dpi_max, round(dpi / 100) * 100))
+    return dpi // 100 - 1
+
+
+def decode_m30_dpi(raw: int) -> int:
+    return (raw + 1) * 100
+
+
+def m30_checksum(frame: bytes) -> int:
+    """Sum of every byte after the checksum except the last one of a full frame, as the official app does."""
+    return sum(frame[1 : M30_FRAME_LEN - 1]) & 0xFF
+
+
+def build_m30_frame(cmd: int, para: int, payload: bytes = b"") -> bytes:
+    frame = bytearray(M30_FRAME_LEN)
+    frame[1] = cmd
+    frame[2] = para
+    frame[3] = 1  # number of packages
+    frame[4] = 0  # package index
+    frame[5:7] = len(payload).to_bytes(2, "little")
+    frame[M30_PAYLOAD_OFFSET : M30_PAYLOAD_OFFSET + len(payload)] = payload
+    frame[0] = m30_checksum(frame)
+    return bytes(frame)
+
+
+def parse_m30_config(resp: bytes) -> bytearray:
+    """Extracts the config block from a 0x44 response, refusing anything that doesn't look right.
+
+    The block read here is the base of every write, so a bad read must never reach the mouse.
+    """
+    end = M30_PAYLOAD_OFFSET + M30_CONFIG_LEN
+    if len(resp) < end or resp[1] != M30_CMD_GET_CONFIG:
+        raise MG5Error(f"Respuesta de configuración del M30 demasiado corta ({len(resp)} bytes)")
+    if resp[0] != m30_checksum(resp):
+        raise MG5Error("Respuesta de configuración del M30 con checksum incorrecto")
+    block = bytearray(resp[M30_PAYLOAD_OFFSET:end])
+    if not any(block) or all(b == 0xFF for b in block):
+        raise MG5Error("El M30 ha devuelto un bloque de configuración vacío")
+    level, count = block[M30_OFF_DPI_LEVEL] >> 4, block[M30_OFF_DPI_LEVEL] & 0x0F
+    if not (1 <= count <= DPI_LEVELS and 1 <= level <= count):
+        raise MG5Error(f"Bloque de configuración del M30 no válido (nivel DPI 0x{block[M30_OFF_DPI_LEVEL]:02x})")
+    return block
+
+
+@dataclass
+class M30Config:
+    """Same interface as Config, over the M30's 400-byte block."""
+
+    raw: bytearray
+
+    @property
+    def report_rate(self) -> int:
+        return M30_REPORT_RATE_BY_ID.get(self.raw[M30_OFF_REPORT_RATE] & 0x0F, 1000)
+
+    @property
+    def dpi_level(self) -> int:
+        return self.raw[M30_OFF_DPI_LEVEL] >> 4
+
+    @property
+    def dpi_level_count(self) -> int:
+        return self.raw[M30_OFF_DPI_LEVEL] & 0x0F
+
+    def dpi(self, level: int) -> int:
+        i = M30_OFF_DPI_X + (level - 1) * 2
+        return decode_m30_dpi(int.from_bytes(self.raw[i : i + 2], "little"))
+
+    def dpi_color(self, level: int) -> tuple[int, int, int]:
+        i = M30_OFF_DPI_COLORS + (level - 1) * 3
+        return tuple(self.raw[i : i + 3])
+
+    @property
+    def lod(self) -> int:
+        return self.raw[M30_OFF_LOD] & 0x0F
+
+    @property
+    def debounce(self) -> int:
+        return self.raw[M30_OFF_DEBOUNCE] & 0x0F
+
+    @property
+    def performance(self) -> int:
+        """The M30 flags mapped onto the MG5's performance byte (PERF_* masks); no sensor mode or glass mode."""
+        value = 0
+        if self.raw[M30_OFF_DEBOUNCE] & 0x80:
+            value |= PERF_MOTION_SYNC
+        if self.raw[M30_OFF_FLAGS] & 0x01:
+            value |= PERF_ANGLE_SNAPPING
+        if self.raw[M30_OFF_FLAGS] & 0x80:
+            value |= PERF_RIPPLE_CONTROL
+        return value
+
+    @property
+    def sensor_mode(self) -> int:
+        return 0
+
+    def flag(self, mask: int) -> bool:
+        return bool(self.performance & mask)
+
+    @property
+    def sleep_seconds(self) -> int:
+        return self.raw[M30_OFF_SLEEP] * 60
+
+
+def m30_changes_for_performance(value: int) -> dict[int, tuple[int, int]]:
+    """Translates a PERF_* byte into M30 config bytes: {offset: (value, mask)}."""
+    motion = 0x80 if value & PERF_MOTION_SYNC else 0
+    flags = (0x01 if value & PERF_ANGLE_SNAPPING else 0) | (0x80 if value & PERF_RIPPLE_CONTROL else 0)
+    return {M30_OFF_DEBOUNCE: (motion, 0x80), M30_OFF_FLAGS: (flags, 0x81)}
+
+
+def apply_m30_changes(block: bytes, changes: dict[int, tuple[int, int]]) -> bytearray:
+    """Returns a copy of `block` with only the masked bits of each changed byte replaced."""
+    new = bytearray(block)
+    for offset, (value, mask) in changes.items():
+        new[offset] = new[offset] & ~mask & 0xFF | value & mask
+    return new
+
+
+class M30:
+    """Experimental backend for the RK M30. Same interface as MG5."""
+
+    def __init__(self, info: DeviceInfo | None = None):
+        self.info = info or find_device((M30_MODEL,))
+        self.dev = Hidraw(self.info.path)
+
+    @property
+    def model(self) -> Model:
+        return self.info.model
+
+    def close(self) -> None:
+        self.dev.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+    @property
+    def fileno(self) -> int:
+        return self.dev.fd
+
+    # -- transport -----------------------------------------------------------
+
+    def _request(self, cmd: int, para: int, payload: bytes, tries: int, interval: float) -> bytes | None:
+        """Sends a frame and polls report 9 until a response for the same command shows up."""
+        self.dev.send_feature_report(M30_REPORT_ID, build_m30_frame(cmd, para, payload))
+        for _ in range(tries):
+            time.sleep(interval)
+            resp = self.dev.get_feature_report(M30_REPORT_ID, M30_FRAME_LEN)
+            if len(resp) >= 2 and resp[1] == cmd:
+                return resp
+        return None
+
+    # -- reads ---------------------------------------------------------------
+
+    def is_online(self, timeout: float = 1.0) -> bool:
+        # The M30 has no online query; a config read that times out raises MouseOffline instead.
+        return True
+
+    def wait_online(self, timeout: float = 4.0) -> bool:
+        return True
+
+    def read_battery(self) -> Battery | None:
+        return None
+
+    def read_config(self) -> M30Config:
+        resp = self._request(M30_CMD_GET_CONFIG, 0, bytes(M30_CONFIG_LEN), tries=8, interval=0.05)
+        if resp is None:
+            raise MouseOffline("El ratón no responde (¿apagado o fuera de alcance?)")
+        return M30Config(parse_m30_config(resp))
+
+    def read_keys(self) -> list[int]:
+        raise MG5Error("El RK M30 no permite leer la asignación de botones")
+
+    def read_firmware(self) -> tuple[str, str] | None:
+        """(mouse, receiver) firmware versions; the receiver one is only meaningful over 2.4G."""
+        resp = self._request(M30_CMD_FW_VERSION, 1, b"\x00", tries=30, interval=0.02)
+        if resp is None or len(resp) < M30_PAYLOAD_OFFSET + 4:
+            return None
+        v = resp[M30_PAYLOAD_OFFSET : M30_PAYLOAD_OFFSET + 4]
+        return f"{v[0]:02x}{v[1]:02x}", f"{v[2]:02x}{v[3]:02x}"
+
+    # -- writes --------------------------------------------------------------
+
+    def _modify(self, changes: dict[int, tuple[int, int]]) -> None:
+        """Read-modify-write of the config block, verified by reading it back."""
+        current = self.read_config().raw
+        block = apply_m30_changes(current, changes)
+        if block == current:
+            return
+        # Same order as the official app: cmdPara 0, then 1 if the mouse didn't keep the change.
+        for para in (0, 1):
+            self._request(M30_CMD_SET_CONFIG, para, bytes(block), tries=4, interval=0.04)
+            time.sleep(0.1)
+            stored = self.read_config().raw
+            if all(stored[off] & mask == block[off] & mask for off, (_value, mask) in changes.items()):
+                return
+        raise MG5Error("El RK M30 no ha guardado el cambio (la relectura no coincide)")
+
+    def set_report_rate(self, hz: int) -> None:
+        self._modify({M30_OFF_REPORT_RATE: (M30_REPORT_RATES[hz], 0x0F)})
+
+    def set_lod(self, lod: int) -> None:
+        self._modify({M30_OFF_LOD: (lod, 0x0F)})
+
+    def set_debounce(self, ms: int) -> None:
+        # Only 4 bits: the official app offers up to 20 ms, which wraps around to 0..4.
+        self._modify({M30_OFF_DEBOUNCE: (max(1, min(M30_MODEL.debounce_max, ms)), 0x0F)})
+
+    def set_performance(self, value: int) -> None:
+        self._modify(m30_changes_for_performance(value))
+
+    def set_sleep(self, seconds: int) -> None:
+        self._modify({M30_OFF_SLEEP: (seconds // 60, 0xFF)})
+
+    def set_key(self, index: int, raw: int) -> None:
+        raise MG5Error("La reasignación de botones no está disponible para el RK M30")
+
+    def set_dpi_value(self, level: int, dpi: int) -> None:
+        raw = encode_m30_dpi(dpi).to_bytes(2, "little")
+        changes = {}
+        for base in (M30_OFF_DPI_X, M30_OFF_DPI_Y):
+            offset = base + (level - 1) * 2
+            changes[offset] = (raw[0], 0xFF)
+            changes[offset + 1] = (raw[1], 0xFF)
+        self._modify(changes)
+
+    def set_dpi_color(self, level: int, rgb: tuple[int, int, int]) -> None:
+        offset = M30_OFF_DPI_COLORS + (level - 1) * 3
+        self._modify({offset + i: (rgb[i], 0xFF) for i in range(3)})
+
+    def set_dpi_level_count(self, config: M30Config, count: int) -> None:
+        active = min(config.dpi_level, count)
+        self.set_dpi_level_raw(active << 4 | count)
+
+    def set_dpi_level_raw(self, value: int) -> None:
+        self._modify({M30_OFF_DPI_LEVEL: (value, 0xFF)})
+
+    def activate_dpi_level(self, config: M30Config, level: int) -> None:
+        self.set_dpi_level_raw(level << 4 | config.dpi_level_count)
+
+    # -- events --------------------------------------------------------------
+
+    def read_events(self) -> list[Event]:
+        """The M30 reports nothing we know how to decode; just drain the queue."""
+        while self.dev.read(M30_FRAME_LEN + 1) is not None:
+            pass
+        return []

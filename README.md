@@ -1,11 +1,35 @@
 # Open RK MG5 Control Panel
 
-Panel de control para Linux del ratón **Royal Kludge MG5**: DPI por niveles, colores, frecuencia de sondeo,
+Panel de control para Linux del ratón **Royal Kludge MG5** (y, de forma experimental, del **RK M30**): DPI por niveles, colores, frecuencia de sondeo,
 LOD, debounce, modo del sensor, Motion Sync, Ripple Control, corrección de ángulo, modo cristal, reposo
 y reasignación de los seis botones (ratón, DPI, multimedia o cualquier tecla con modificadores).
 
-Funciona con el receptor 2.4G (`372e:103f`) y, en principio, por cable (`372e:1073`, aún sin probar).
+## Ratones compatibles
+
+| Ratón | Receptor 2.4G | Cable | Estado |
+|---|---|---|---|
+| Royal Kludge MG5 | `372e:103f` | `372e:1073` | Probado por el receptor 2.4G; por cable, aún sin probar |
+| Royal Kludge M30 | `258a:0138` | `258a:0136` | **Nuevo, experimental**: sin probar todavía con un ratón real ([detalles](#rk-m30-experimental-sin-probar)) |
+
 El protocolo está documentado en [docs/PROTOCOL.md](docs/PROTOCOL.md).
+
+¿Tienes un M30? Antes de cambiar nada, prueba la lectura (no escribe en el ratón) con `python3 -m rk_mg5 --probe`
+y comparte la salida en un [issue](https://github.com/blzkz/open-rk-mg5-control-panel/issues).
+
+### RK M30 (experimental, sin probar)
+
+También reconoce el **Royal Kludge M30** (`258a:0138` receptor 2.4G, `258a:0136` cable), con un protocolo
+distinto sacado del configurador web oficial. **Nadie lo ha probado todavía con un M30 real.** La app muestra
+un aviso cuando hay uno conectado y solo ofrece lo que tiene: DPI 100–24000 en pasos de 100, hasta 6 niveles,
+sondeo hasta 1000 Hz, LOD, debounce (1–15 ms), Motion Sync, Ripple Control, corrección de ángulo y reposo.
+No hay batería, modo del sensor ni modo cristal, y la reasignación de botones está desactivada porque el M30
+no permite leerla.
+
+Antes de cambiar nada, si tienes un M30, prueba la lectura (no escribe nada en el ratón) y comparte la salida en un issue:
+
+```bash
+python3 -m rk_mg5 --probe
+```
 
 ![Personalizar](docs/screenshot.png)
 ![Rendimiento](docs/screenshot-performance.png)
@@ -66,6 +90,12 @@ funciona en KDE Plasma y en GNOME con la extensión AppIndicator.
 En Preferencias se elige si cerrar la ventana la minimiza a la bandeja, si arranca con la sesión y el umbral
 de batería baja.
 
+## Tests
+
+```bash
+python3 -m unittest discover -s tests
+```
+
 ## Publicar una versión
 
 1. Actualiza `__version__` en `rk_mg5/__init__.py` y añade la versión a `data/io.github.blzkz.OpenRkMg5.metainfo.xml`.
@@ -74,4 +104,4 @@ de batería baja.
 
 ## Licencia
 
-GPL-3.0-or-later. Royal Kludge y MG5 son marcas de sus propietarios; este proyecto no está afiliado a Royal Kludge.
+GPL-3.0-or-later. Royal Kludge, MG5 y M30 son marcas de sus propietarios; este proyecto no está afiliado a Royal Kludge.

@@ -1,3 +1,6 @@
 # Royal Kludge MG5: let the logged-in user access the configuration interface.
 # 372e:103f = 2.4G receiver, 372e:1073 = USB cable.
 SUBSYSTEM=="hidraw", ATTRS{idVendor}=="372e", ATTRS{idProduct}=="103f|1073", TAG+="uaccess"
+# Royal Kludge M30 (experimental): 258a:0138 = 2.4G receiver, 258a:0136 = USB cable.
+# 258a is a generic SinoWealth vendor id, so only these two product ids.
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="258a", ATTRS{idProduct}=="0136|0138", TAG+="uaccess"

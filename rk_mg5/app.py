@@ -1,4 +1,4 @@
-"""GTK4 / libadwaita control panel for the Royal Kludge MG5, laid out like Synapse / G Hub."""
+"""GTK4 / libadwaita control panel for Royal Kludge mice (MG5, experimental M30), laid out like Synapse / G Hub."""
 
 import os
 import sys
@@ -20,7 +20,11 @@ from .tray import MenuItem, TrayIcon  # noqa: E402
 
 APP_ID = "io.github.blzkz.OpenRkMg5"
 APP_NAME = "Panel RK MG5"
-UDEV_RULE = 'SUBSYSTEM=="hidraw", ATTRS{idVendor}=="372e", ATTRS{idProduct}=="103f|1073", TAG+="uaccess"'
+UDEV_RULE = (
+    'SUBSYSTEM=="hidraw", ATTRS{idVendor}=="372e", ATTRS{idProduct}=="103f|1073", TAG+="uaccess"\n'
+    'SUBSYSTEM=="hidraw", ATTRS{idVendor}=="258a", ATTRS{idProduct}=="0136|0138", TAG+="uaccess"'
+)
+NOT_FOUND = "Conecta el receptor 2.4G o el cable del RK MG5 (o del RK M30, experimental)."
 BATTERY_POLL_SECONDS = 60
 DPI_APPLY_DELAY_MS = 500
 OFFLINE_RETRY_SECONDS = 3
@@ -125,10 +129,16 @@ class DpiLevelRow(Adw.ActionRow):
         self.color.connect("notify::rgba", self._on_color_changed)
         self.add_suffix(self.color)
 
+        self.dpi_step = p.DPI_STEP
         adjustment = Gtk.Adjustment(lower=p.DPI_MIN, upper=p.DPI_MAX, step_increment=p.DPI_STEP, page_increment=1000)
         self.spin = Gtk.SpinButton(adjustment=adjustment, numeric=True, valign=Gtk.Align.CENTER, width_chars=6)
         self.spin.connect("value-changed", self._on_dpi_changed)
         self.add_suffix(self.spin)
+
+    def set_model(self, model: p.Model) -> None:
+        self.dpi_step = model.dpi_step
+        adjustment = self.spin.get_adjustment()
+        adjustment.configure(adjustment.get_value(), model.dpi_min, model.dpi_max, model.dpi_step, 1000, 0)
 
     def load(self, config: p.Config) -> None:
         self.spin.set_value(config.dpi(self.level))
@@ -142,8 +152,8 @@ class DpiLevelRow(Adw.ActionRow):
     def _on_dpi_changed(self, spin: Gtk.SpinButton) -> None:
         if self.window.loading:
             return
-        # Snap to the 50 DPI grid and wait until the user stops typing or holding the arrows.
-        value = round(spin.get_value() / p.DPI_STEP) * p.DPI_STEP
+        # Snap to the model's DPI grid and wait until the user stops typing or holding the arrows.
+        value = round(spin.get_value() / self.dpi_step) * self.dpi_step
         if self._apply_source:
             GLib.source_remove(self._apply_source)
         self._apply_source = GLib.timeout_add(DPI_APPLY_DELAY_MS, self._apply_dpi, value)
@@ -172,8 +182,8 @@ class MainWindow(Adw.ApplicationWindow):
     def __init__(self, app: Adw.Application):
         super().__init__(application=app, title=APP_NAME, default_width=1180, default_height=780)
         self.app = app
-        self.mouse: p.MG5 | None = None
-        self.config: p.Config | None = None
+        self.mouse: p.MG5 | p.M30 | None = None
+        self.config: p.Config | p.M30Config | None = None
         self.keys: list[int] = list(a.DEFAULT_KEYS)
         self.selected_button = 1
         self.capturing_key = False
@@ -185,6 +195,8 @@ class MainWindow(Adw.ApplicationWindow):
         toolbar = Adw.ToolbarView()
         toolbar.add_top_bar(self._build_header())
         toolbar.add_top_bar(self._build_tabbar())
+        self.banner = Adw.Banner(revealed=False)
+        toolbar.add_top_bar(self.banner)
         self.toasts.set_child(toolbar)
         self.set_content(self.toasts)
 
@@ -207,7 +219,8 @@ class MainWindow(Adw.ApplicationWindow):
     def _build_header(self) -> Gtk.Widget:
         header = Adw.HeaderBar()
         title_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER)
-        title_box.append(Gtk.Label(label="ROYAL KLUDGE MG5", css_classes=["device-title"]))
+        self.title_label = Gtk.Label(label="ROYAL KLUDGE MG5", css_classes=["device-title"])
+        title_box.append(self.title_label)
         self.connection_label = Gtk.Label(label="Buscando ratón…", css_classes=["device-subtitle"])
         title_box.append(self.connection_label)
         header.set_title_widget(title_box)
@@ -241,7 +254,7 @@ class MainWindow(Adw.ApplicationWindow):
         header.pack_end(Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=main_menu, primary=True,
                                        tooltip_text="Menú principal"))
 
-        battery = Gtk.Box(spacing=6, css_classes=["battery"])
+        battery = self.battery_box = Gtk.Box(spacing=6, css_classes=["battery"])
         self.battery_icon = Gtk.Image(icon_name="battery-missing-symbolic")
         self.battery_label = Gtk.Label(label="—")
         battery.append(self.battery_label)
@@ -307,7 +320,13 @@ class MainWindow(Adw.ApplicationWindow):
         return box
 
     def _panel_customize(self) -> Gtk.Widget:
-        box = self._panel_box("PERSONALIZAR", "Haz clic en un botón del dibujo para cambiar lo que hace.")
+        panel = self._panel_box("PERSONALIZAR", "Haz clic en un botón del dibujo para cambiar lo que hace.")
+        self.remap_notice = _label("Este ratón no permite leer qué hace cada botón, así que la reasignación "
+                                   "está desactivada para no sobrescribir su configuración a ciegas.",
+                                   "panel-subtitle", visible=False)
+        panel.append(self.remap_notice)
+        box = self.remap_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        panel.append(box)
         self.button_title = _label("", "section-label", margin_top=8)
         box.append(self.button_title)
 
@@ -341,7 +360,7 @@ class MainWindow(Adw.ApplicationWindow):
         reset = Gtk.Button(label="Restaurar este botón", halign=Gtk.Align.START, css_classes=["flat"], margin_top=6)
         reset.connect("clicked", lambda *_: self._assign(a.DEFAULT_KEYS[self.selected_button]))
         box.append(reset)
-        return box
+        return panel
 
     def _panel_performance(self) -> Gtk.Widget:
         box = self._panel_box("RENDIMIENTO", "Niveles de sensibilidad que recorre el botón DPI y tasa de sondeo.")
@@ -366,7 +385,8 @@ class MainWindow(Adw.ApplicationWindow):
         self.rate_segments = Segmented([str(hz) for hz in self.rates],
                                        lambda i: self.apply(lambda m, c: m.set_report_rate(self.rates[i])))
         box.append(self.rate_segments)
-        box.append(_label("Por encima de 1000 Hz el ratón gasta bastante más batería.", "panel-subtitle"))
+        self.rate_hint = _label("Por encima de 1000 Hz el ratón gasta bastante más batería.", "panel-subtitle")
+        box.append(self.rate_hint)
         return box
 
     def _panel_sensor(self) -> Gtk.Widget:
@@ -378,7 +398,8 @@ class MainWindow(Adw.ApplicationWindow):
                                       lambda i: self.apply(lambda m, c: m.set_lod(self.lods[i])))
         box.append(self.lod_segments)
 
-        box.append(_label("MODO DEL SENSOR", "section-label", margin_top=8))
+        self.mode_label = _label("MODO DEL SENSOR", "section-label", margin_top=8)
+        box.append(self.mode_label)
         self.modes = list(p.SENSOR_MODES)
         self.mode_segments = Segmented(
             ["Oficina", "Rendimiento", "Competitivo"],
@@ -409,17 +430,19 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _panel_power(self) -> Gtk.Widget:
         box = self._panel_box("ENERGÍA", "Batería y reposo del ratón.")
-        box.append(_label("BATERÍA", "section-label", margin_top=8))
+        self.battery_section = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        box.append(self.battery_section)
+        self.battery_section.append(_label("BATERÍA", "section-label", margin_top=8))
         self.battery_big = Gtk.Label(label="—", xalign=0, css_classes=["big-value"])
-        box.append(self.battery_big)
+        self.battery_section.append(self.battery_big)
         self.battery_bar = Gtk.LevelBar(min_value=0, max_value=100)
-        box.append(self.battery_bar)
+        self.battery_section.append(self.battery_bar)
         self.battery_state = _label("", "panel-subtitle")
-        box.append(self.battery_state)
+        self.battery_section.append(self.battery_state)
 
         box.append(_label("REPOSO", "section-label", margin_top=12))
         power = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE, css_classes=["boxed-list"])
-        self.sleep_times = p.SLEEP_TIMES
+        self.sleep_times = list(p.SLEEP_TIMES)
         self.sleep_row = Adw.ComboRow(title="Dormir tras inactividad",
                                       model=Gtk.StringList.new([_sleep_label(s) for s in self.sleep_times]))
         self.sleep_row.connect("notify::selected", self._on_sleep_changed)
@@ -430,7 +453,8 @@ class MainWindow(Adw.ApplicationWindow):
     def _select_tab(self, name: str) -> None:
         self.tabs[name].set_active(True)
         self.panels.set_visible_child_name(name)
-        self.mouse_view.set_callouts_visible(name == "customize")
+        remap = self.mouse is None or self.mouse.model.key_remap
+        self.mouse_view.set_callouts_visible(name == "customize" and remap)
         self._update_badge()
 
     # -- device lifecycle ------------------------------------------------------
@@ -438,15 +462,15 @@ class MainWindow(Adw.ApplicationWindow):
     def connect_mouse(self) -> None:
         self._disconnect()
         try:
-            self.mouse = p.MG5()
+            self.mouse = p.open_device()
             # Cheap check so a sleeping mouse doesn't block the UI on every retry.
             if self.mouse.info.wireless and not self.mouse.is_online(timeout=0.3):
                 raise p.MouseOffline()
             self.config = self.mouse.read_config()
-            self.keys = self.mouse.read_keys()
-            battery = self.mouse.read_battery()
+            self.keys = self._read_keys()
+            battery = self.mouse.read_battery() if self.mouse.model.battery else None
         except p.DeviceNotFound:
-            self._show_status("No se encuentra el ratón", "Conecta el receptor 2.4G o el cable del RK MG5.")
+            self._show_status("No se encuentra el ratón", NOT_FOUND)
             return
         except PermissionError:
             self._show_status(
@@ -468,11 +492,46 @@ class MainWindow(Adw.ApplicationWindow):
             GLib.PRIORITY_DEFAULT, self.mouse.fileno, GLib.IOCondition.IN, self._on_device_event
         )
         self.connection_label.set_label("Receptor 2.4G" if self.mouse.info.wireless else "Cable USB")
-        self._show_battery(battery)
+        self._set_model(self.mouse.model)
+        if battery is not None:
+            self._show_battery(battery)
         self._load_config()
         self._load_keys()
         self.stack.set_visible_child_name("settings")
         self._ensure_profile()
+
+    def _read_keys(self) -> list[int]:
+        # Without a way to read the buttons, keep the factory layout just for the labels.
+        return self.mouse.read_keys() if self.mouse.model.key_remap else list(a.DEFAULT_KEYS)
+
+    def _set_model(self, model: p.Model) -> None:
+        """Shows only the options the connected model has."""
+        self.app.model_name = model.name
+        self.title_label.set_label("ROYAL KLUDGE " + model.name.split()[-1])
+        self.banner.set_title(f"Soporte experimental para el {model.name}: aún sin probar con un ratón real")
+        self.banner.set_revealed(model.experimental)
+        self.battery_box.set_visible(model.battery)
+        self.battery_section.set_visible(model.battery)
+        self.remap_notice.set_visible(not model.key_remap)
+        self.remap_box.set_visible(model.key_remap)
+        self.mouse_view.set_callouts_visible(model.key_remap and self.panels.get_visible_child_name() == "customize")
+        self.loading = True
+        try:
+            for row in self.level_rows:
+                row.set_model(model)
+            for hz, button in zip(self.rates, self.rate_segments.buttons):
+                button.set_visible(hz in model.report_rates)
+            self.rate_hint.set_visible(max(model.report_rates) > 1000)
+            self.mode_label.set_visible(model.sensor_mode)
+            self.mode_segments.set_visible(model.sensor_mode)
+            for mask, row in self.flag_rows:
+                row.set_visible(mask != p.PERF_GLASS_MODE or model.glass_mode)
+            self.debounce_row.get_adjustment().set_upper(model.debounce_max)
+            if list(model.sleep_times) != self.sleep_times:
+                self.sleep_times = list(model.sleep_times)
+                self.sleep_row.set_model(Gtk.StringList.new([_sleep_label(s) for s in self.sleep_times]))
+        finally:
+            self.loading = False
 
     def _retry_offline(self) -> bool:
         self._retry_source = 0
@@ -544,8 +603,9 @@ class MainWindow(Adw.ApplicationWindow):
         if self.mouse is not None:
             try:
                 self.config = self.mouse.read_config()
-                self.keys = self.mouse.read_keys()
-                self._show_battery(self.mouse.read_battery())
+                self.keys = self._read_keys()
+                if self.mouse.model.battery:
+                    self._show_battery(self.mouse.read_battery())
                 self._load_config()
                 self._load_keys()
             except (p.MG5Error, OSError):
@@ -564,7 +624,7 @@ class MainWindow(Adw.ApplicationWindow):
         self.app.update_battery(battery)
 
     def _poll_battery(self) -> bool:
-        if self.mouse is not None:
+        if self.mouse is not None and self.mouse.model.battery:
             try:
                 self._show_battery(self.mouse.read_battery())
             except (p.MG5Error, OSError):
@@ -590,7 +650,7 @@ class MainWindow(Adw.ApplicationWindow):
         except OSError:
             # The receiver was unplugged.
             self._event_source = 0
-            self._show_status("No se encuentra el ratón", "Conecta el receptor 2.4G o el cable del RK MG5.")
+            self._show_status("No se encuentra el ratón", NOT_FOUND)
             return GLib.SOURCE_REMOVE
         return GLib.SOURCE_CONTINUE
 
@@ -610,7 +670,7 @@ class MainWindow(Adw.ApplicationWindow):
             if not self.mouse.wait_online():
                 raise p.MouseOffline()
             self.config = self.mouse.read_config()
-            self.keys = self.mouse.read_keys()
+            self.keys = self._read_keys()
             ok = True
             self._autosave_profile()
         except p.MouseOffline:
@@ -718,7 +778,7 @@ class MainWindow(Adw.ApplicationWindow):
         """First run: turn whatever the mouse has into the default profile."""
         if self.app.profiles.names:
             return
-        profile = Profile.from_mouse("Predeterminado", self.config, self.keys)
+        profile = Profile.from_mouse("Predeterminado", self.config, self.keys, self.mouse.model.name)
         self.app.profiles.save(profile)
         self.app.settings.active_profile = profile.name
         self.app.settings.save()
@@ -726,8 +786,10 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _autosave_profile(self) -> None:
         name = self.app.settings.active_profile
-        if name and name in self.app.profiles.profiles and self.config is not None:
-            self.app.profiles.save(Profile.from_mouse(name, self.config, self.keys))
+        profile = self.app.profiles.get(name) if name else None
+        # Never overwrite a profile of another model with this mouse's settings.
+        if profile is not None and self.config is not None and profile.model == self.mouse.model.name:
+            self.app.profiles.save(Profile.from_mouse(name, self.config, self.keys, profile.model))
 
     def _on_profile_selected(self, dropdown, _pspec) -> None:
         if self.loading:
@@ -771,13 +833,14 @@ class MainWindow(Adw.ApplicationWindow):
         dialog.present(self)
 
     def _profile_new(self) -> None:
-        if self.config is None:
+        if self.config is None or self.mouse is None:
             self.toast("Conecta el ratón para crear un perfil")
             return
+        config, keys, model = self.config, list(self.keys), self.mouse.model.name
 
         def create(name):
             name = self.app.profiles.unique_name(name)
-            self.app.profiles.save(Profile.from_mouse(name, self.config, self.keys))
+            self.app.profiles.save(Profile.from_mouse(name, config, keys, model))
             self.app.settings.active_profile = name
             self.app.settings.save()
             self.refresh_profiles()
@@ -849,6 +912,7 @@ class Application(Adw.Application):
         self.tray: TrayIcon | None = None
         self.window: MainWindow | None = None
         self.battery: p.Battery | None = None
+        self.model_name = p.MG5_MODEL.name
         self._low_battery_notified = False
 
     def do_startup(self):
@@ -945,7 +1009,7 @@ class Application(Adw.Application):
         self.tray.set_icon(icon)
         self.tray.set_status("NeedsAttention" if low else "Active")
         active = self.settings.active_profile
-        self.tray.set_tooltip("RK MG5", f"{battery_text}\nPerfil: {active or '—'}")
+        self.tray.set_tooltip(self.model_name, f"{battery_text}\nPerfil: {active or '—'}")
 
         items = [
             MenuItem("Mostrar panel", self.show_window, icon=APP_ID),
