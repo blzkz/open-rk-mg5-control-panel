@@ -82,6 +82,7 @@ class Profile:
     """Everything the mouse stores: buttons, DPI, polling, sensor and power settings."""
 
     name: str
+    model: str = p.MG5_MODEL.name
     report_rate: int = 1000
     dpi_level_count: int = 6
     active_dpi_level: int = 1
@@ -99,9 +100,10 @@ class Profile:
                                                          "0x01050100", "0x01040100", "0x05040000"])
 
     @classmethod
-    def from_mouse(cls, name: str, config: p.Config, keys: list[int]) -> "Profile":
+    def from_mouse(cls, name: str, config: p.Config, keys: list[int], model: str = p.MG5_MODEL.name) -> "Profile":
         return cls(
             name=name,
+            model=model,
             report_rate=config.report_rate,
             dpi_level_count=config.dpi_level_count,
             active_dpi_level=config.dpi_level,
@@ -129,11 +131,14 @@ class Profile:
 
     def apply_to(self, mouse: p.MG5) -> None:
         """Writes only the settings that differ from what the mouse currently has."""
+        if self.model != mouse.model.name:
+            raise p.MG5Error(f"El perfil «{self.name}» es de un {self.model}, no de un {mouse.model.name}")
         config = mouse.read_config()
-        keys = mouse.read_keys()
-        for index, raw in enumerate(int(b, 16) for b in self.buttons):
-            if keys[index] != raw:
-                mouse.set_key(index, raw)
+        if mouse.model.key_remap:
+            keys = mouse.read_keys()
+            for index, raw in enumerate(int(b, 16) for b in self.buttons):
+                if keys[index] != raw:
+                    mouse.set_key(index, raw)
         for level in range(1, p.DPI_LEVELS + 1):
             dpi = self.dpi_levels[level - 1]
             if config.dpi(level) != dpi:
@@ -150,7 +155,7 @@ class Profile:
         count = max(1, min(p.DPI_LEVELS, self.dpi_level_count))
         active = max(1, min(count, self.active_dpi_level))
         if config.dpi_level_count != count:
-            mouse.write_config(p.OFF_DPI_LEVEL, bytes([config.dpi_level << 4 | count]))
+            mouse.set_dpi_level_raw(config.dpi_level << 4 | count)
         # Selecting the level makes the new DPI value take effect.
         mouse.activate_dpi_level(mouse.read_config(), active)
         # Polling rate and sensor mode go last: the mouse re-links with the receiver after

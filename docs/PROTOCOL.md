@@ -1,4 +1,4 @@
-# Protocolo HID del Royal Kludge MG5
+# Protocolo HID del Royal Kludge MG5 (y M30, experimental)
 
 Obtenido de dos fuentes:
 
@@ -132,4 +132,105 @@ Byte 0 = `0xFA`. Byte 1 = tipo:
 
 ```
 SUBSYSTEM=="hidraw", ATTRS{idVendor}=="372e", ATTRS{idProduct}=="103f|1073", TAG+="uaccess"
+```
+
+---
+
+# RK M30 (experimental, sin probar con hardware)
+
+Todo lo de esta sección sale del configurador web oficial (`https://drive.rkgaming.com`, bundle
+`assets/index-BSYKKems.js`, clase `_ye` y la página del M30). **No se ha probado con un M30 real**: los
+offsets y comandos son los que usa la web, no observaciones del ratón.
+
+Aunque la web lo etiqueta como protocolo "BeiYing", igual que el MG5, la comunicación es otra.
+
+## Identificadores USB
+
+| Conexión      | VID:PID     |
+|---------------|-------------|
+| Receptor 2.4G | `258a:0138` |
+| Cable USB     | `258a:0136` |
+
+Usage page `0xFF00`, usage 1 (como el MG5). `0x258A` es el VID genérico de SinoWealth, así que la app además
+exige que el descriptor de esa interfaz declare el report ID 9 (`85 09`).
+
+La web identifica los receptores de VID `372e` por la "contraseña" de emparejamiento leída como u64
+big-endian: `0x040000000026` corresponde a "rk m30 24G" y `0x090000000036` a "rk mg5 24G". Con los PID propios
+del M30 no hace falta.
+
+## Transporte
+
+`SET_FEATURE` / `GET_FEATURE` con el **report 9**, tramas de **519 bytes** (sin contar el report id):
+
+| Byte  | Campo                                                     |
+|-------|-----------------------------------------------------------|
+| 0     | checksum = suma(bytes 1..517) & 0xFF (el último no cuenta) |
+| 1     | cmdId                                                     |
+| 2     | cmdPara                                                   |
+| 3     | número de paquetes (1)                                    |
+| 4     | índice del paquete (0)                                    |
+| 5..6  | longitud del payload, u16 LE                              |
+| 7..   | payload                                                   |
+
+La respuesta tiene la misma forma; la web la reconoce porque el byte 1 repite el cmdId (en WebHID el índice va
+uno por delante por el report id). No hay comando de estado online, ni batería, ni eventos que la web use.
+
+## Comandos
+
+| cmdId       | cmdPara | Payload               | Qué hace                                               |
+|-------------|---------|-----------------------|--------------------------------------------------------|
+| 0x44 (68)   | 0       | 400 bytes a cero      | Lee el bloque de configuración (respuesta: 400 bytes desde el byte 7) |
+| 0x04 (4)    | 0 / 1   | bloque entero (400)   | Escribe el bloque. La web prueba con 0 y, si al releer no coincide, con 1 |
+| 0x01 (1)    | 0       | tabla de botones      | Escribe la tabla de botones (no hay forma de leerla)    |
+| 0x03 (3)    | —       | macros, paquetes de 512 | Macros                                               |
+| 0x48 (72)   | 1       | `[0]`                 | Versión de firmware: payload[0..1] ratón, [2..3] receptor |
+| 0x09 (9)    | —       | —                     | Contraseña de emparejamiento (payload[0..5])           |
+
+Tras escribir, la web espera un ACK (`byte 1 == 4`, resultado en el byte 2, sin significado conocido), relee el
+bloque y compara el byte de nivel DPI y el de reposo.
+
+## Bloque de configuración (400 bytes)
+
+| Offset | Campo            | Codificación                                                           |
+|--------|------------------|------------------------------------------------------------------------|
+| 2      | Polling rate     | bits 3-0: 1 = 125, 2 = 250, 3 = 500, 4 = 1000 Hz                       |
+| 3      | Nivel DPI        | bits 7-4 = nivel activo, bits 3-0 = nº de niveles (hasta 6)            |
+| 4      | LOD              | bits 3-0: 1 = 0,7 mm, 2 = 1,0 mm, 3 = 2,0 mm                           |
+| 5      | Debounce + motion sync | bits 3-0 = debounce en ms, bit 7 = motion sync                   |
+| 6      | Flags            | bit 0 = angle snapping, bit 7 = ripple control                         |
+| 7..    | DPI X niveles 1..6 | u16 LE, DPI = (valor + 1) × 100; rango 100..24000 paso 100           |
+| 27..   | DPI Y niveles 1..6 | igual que X (la web escribe los dos)                                 |
+| 47..   | Color de cada nivel | RGB × 6                                                             |
+| 74     | Reposo           | minutos; opciones 0, 1, 2, 3, 5, 10, 15, 30, 60                         |
+| 75, 76 | Luz DPI          | efecto y brillo                                                         |
+
+Los bytes 256..399 del bloque por defecto de la web repiten la cabecera del principio (¿segundo perfil o copia
+del receptor?); la app los conserva tal cual.
+
+La página del M30 muestra modo del sensor y modo cristal, pero sus funciones no tocan el bloque, así que la app
+no los ofrece.
+
+Tabla de botones (112 bytes, u32 big-endian por botón, mismos valores que el MG5): izquierdo, derecho, central,
+adelante (`0x01050100`), atrás (`0x01040100`) y ciclo DPI (`0x05040000`).
+
+## Fallos de la web oficial (que la app no copia)
+
+- `setDpiColor` escribe el canal rojo en los tres bytes del color.
+- `setReportRate` y `setLodHeight` parten del byte 5 en vez del byte que modifican, así que copian sus bits
+  altos (motion sync) en el byte de polling o de LOD.
+- El debounce admite hasta 20 ms, pero solo hay 4 bits: de 16 a 20 da la vuelta a 0..4. La app lo limita a 15.
+- La web escribe el bloque entero a partir de su copia guardada en el navegador (o de los valores por defecto),
+  no del que tiene el ratón.
+
+## Cómo escribe la app
+
+Cada cambio lee el bloque con `0x44`, comprueba que es válido (longitud, checksum, no todo ceros/`FF`, byte
+de nivel DPI coherente), cambia solo los bits del ajuste, escribe con `0x04` y relee para verificar. Si la
+relectura no coincide reintenta una vez con cmdPara 1, como la web, y si tampoco, da error y no insiste.
+La reasignación de botones y las macros no están implementadas.
+
+Regla udev:
+
+```
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="258a", ATTRS{idProduct}=="0136|0138", TAG+="uaccess"
 ```
