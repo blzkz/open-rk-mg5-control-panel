@@ -89,6 +89,8 @@ class Model:
     glass_mode: bool
     key_remap: bool
     experimental: bool = False
+    # False when the buttons can be written but not read back: the panel keeps the layout it last wrote.
+    key_readback: bool = True
 
     @property
     def product_ids(self) -> tuple[int, int]:
@@ -105,7 +107,7 @@ M30_MODEL = Model(
     name="RK M30", protocol="m30", vendor_id=0x258A, dongle_pid=0x0138, wired_pid=0x0136,
     dpi_min=100, dpi_max=24000, dpi_step=100, report_rates=(125, 250, 500, 1000),
     sleep_times=(0, 60, 120, 180, 300, 600, 900, 1800, 3600), debounce_max=15,
-    battery=False, sensor_mode=False, glass_mode=False, key_remap=False, experimental=True,
+    battery=False, sensor_mode=False, glass_mode=False, key_remap=True, experimental=True, key_readback=False,
 )
 MODELS = (MG5_MODEL, M30_MODEL)
 
@@ -404,6 +406,7 @@ M30_FRAME_LEN = 519
 M30_PAYLOAD_OFFSET = 7
 M30_CONFIG_LEN = 400
 
+M30_CMD_SET_KEYS = 0x01
 M30_CMD_SET_CONFIG = 0x04
 M30_CMD_GET_CONFIG = 0x44
 M30_CMD_FW_VERSION = 0x48
@@ -421,6 +424,12 @@ M30_OFF_SLEEP = 74  # minutes
 
 M30_REPORT_RATES = {125: 1, 250: 2, 500: 3, 1000: 4}
 M30_REPORT_RATE_BY_ID = {v: k for k, v in M30_REPORT_RATES.items()}
+
+# Button table sent with 0x01: one big-endian u32 keyRaw per button (left, right, middle, forward,
+# back, DPI), zero-padded to 80 bytes. Same keyRaw values as the MG5 (see actions.py).
+M30_KEY_TABLE_LEN = 80
+M30_LEFT_CLICK = 0x01010100
+M30_DEFAULT_KEYS = (0x01010100, 0x01020100, 0x01030100, 0x01050100, 0x01040100, 0x05040000)
 
 
 def encode_m30_dpi(dpi: int) -> int:
@@ -447,6 +456,18 @@ def build_m30_frame(cmd: int, para: int, payload: bytes = b"") -> bytes:
     frame[M30_PAYLOAD_OFFSET : M30_PAYLOAD_OFFSET + len(payload)] = payload
     frame[0] = m30_checksum(frame)
     return bytes(frame)
+
+
+def build_m30_key_table(keys: list[int]) -> bytes:
+    if len(keys) != KEY_COUNT:
+        raise MG5Error(f"Hacen falta {KEY_COUNT} botones, no {len(keys)}")
+    # Never leave the mouse without a left click.
+    if M30_LEFT_CLICK not in keys:
+        raise MG5Error("Algún botón tiene que ser el clic izquierdo")
+    table = bytearray(M30_KEY_TABLE_LEN)
+    for i, raw in enumerate(keys):
+        table[i * 4 : i * 4 + 4] = raw.to_bytes(4, "big")
+    return bytes(table)
 
 
 def parse_m30_config(resp: bytes) -> bytearray:
@@ -547,6 +568,9 @@ class M30:
     def __init__(self, info: DeviceInfo | None = None):
         self.info = info or find_device((M30_MODEL,))
         self.dev = Hidraw(self.info.path)
+        # The M30 can't report its buttons: this is the layout the panel last wrote, or assumes
+        # (the active profile's or the factory one). The app seeds it after connecting.
+        self.keys = list(M30_DEFAULT_KEYS)
 
     @property
     def model(self) -> Model:
@@ -596,7 +620,8 @@ class M30:
         return M30Config(parse_m30_config(resp))
 
     def read_keys(self) -> list[int]:
-        raise MG5Error("El RK M30 no permite leer la asignación de botones")
+        """Not read from the mouse (it has no command for it): see `keys`."""
+        return list(self.keys)
 
     def read_firmware(self) -> tuple[str, str] | None:
         """(mouse, receiver) firmware versions; the receiver one is only meaningful over 2.4G."""
@@ -639,8 +664,18 @@ class M30:
     def set_sleep(self, seconds: int) -> None:
         self._modify({M30_OFF_SLEEP: (seconds // 60, 0xFF)})
 
+    def set_keys(self, keys: list[int]) -> None:
+        """Writes the whole button table, as the official app does. There is no way to read it back."""
+        table = build_m30_key_table(keys)
+        # A config read first, so a sleeping or absent mouse fails here instead of losing the write.
+        self.read_config()
+        self._request(M30_CMD_SET_KEYS, 0, table, tries=4, interval=0.04)
+        self.keys = list(keys)
+
     def set_key(self, index: int, raw: int) -> None:
-        raise MG5Error("La reasignación de botones no está disponible para el RK M30")
+        keys = list(self.keys)
+        keys[index] = raw
+        self.set_keys(keys)
 
     def set_dpi_value(self, level: int, dpi: int) -> None:
         raw = encode_m30_dpi(dpi).to_bytes(2, "little")

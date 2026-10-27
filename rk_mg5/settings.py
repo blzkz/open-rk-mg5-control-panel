@@ -135,10 +135,15 @@ class Profile:
             raise p.MG5Error(f"El perfil «{self.name}» es de un {self.model}, no de un {mouse.model.name}")
         config = mouse.read_config()
         if mouse.model.key_remap:
-            keys = mouse.read_keys()
-            for index, raw in enumerate(int(b, 16) for b in self.buttons):
-                if keys[index] != raw:
-                    mouse.set_key(index, raw)
+            buttons = [int(b, 16) for b in self.buttons]
+            if not mouse.model.key_readback:
+                # What the mouse has can't be read, so always write the whole table.
+                mouse.set_keys(buttons)
+            else:
+                keys = mouse.read_keys()
+                for index, raw in enumerate(buttons):
+                    if keys[index] != raw:
+                        mouse.set_key(index, raw)
         for level in range(1, p.DPI_LEVELS + 1):
             dpi = self.dpi_levels[level - 1]
             if config.dpi(level) != dpi:

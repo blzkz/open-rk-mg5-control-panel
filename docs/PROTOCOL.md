@@ -181,7 +181,7 @@ uno por delante por el report id). No hay comando de estado online, ni batería,
 |-------------|---------|-----------------------|--------------------------------------------------------|
 | 0x44 (68)   | 0       | 400 bytes a cero      | Lee el bloque de configuración (respuesta: 400 bytes desde el byte 7) |
 | 0x04 (4)    | 0 / 1   | bloque entero (400)   | Escribe el bloque. La web prueba con 0 y, si al releer no coincide, con 1 |
-| 0x01 (1)    | 0       | tabla de botones      | Escribe la tabla de botones (no hay forma de leerla)    |
+| 0x01 (1)    | 0       | tabla de botones (80) | Escribe la tabla de botones entera (no hay forma de leerla) |
 | 0x03 (3)    | —       | macros, paquetes de 512 | Macros                                               |
 | 0x48 (72)   | 1       | `[0]`                 | Versión de firmware: payload[0..1] ratón, [2..3] receptor |
 | 0x09 (9)    | —       | —                     | Contraseña de emparejamiento (payload[0..5])           |
@@ -210,8 +210,21 @@ del receptor?); la app los conserva tal cual.
 La página del M30 muestra modo del sensor y modo cristal, pero sus funciones no tocan el bloque, así que la app
 no los ofrece.
 
-Tabla de botones (112 bytes, u32 big-endian por botón, mismos valores que el MG5): izquierdo, derecho, central,
-adelante (`0x01050100`), atrás (`0x01040100`) y ciclo DPI (`0x05040000`).
+## Botones
+
+Revisado en un bundle posterior, `assets/index-CTQPyNpU.js` (la clase del M30 pasa a llamarse `Oye`, mismo protocolo):
+
+- `0x01`, cmdPara 0, un paquete, payload de **80 bytes**: un `keyRaw` u32 big-endian por botón en el orden
+  izquierdo, derecho, central, adelante, atrás, DPI (índices 0..5), y el resto a cero. La web manda siempre la tabla
+  entera, copiada del perfil que guarda en el navegador; nunca un botón suelto.
+- Tabla de fábrica: `01010100 01020100 01030100 01050100 01040100 05040000` (igual que el MG5).
+- Los `keyRaw` y la forma de construirlos son los mismos que en el MG5 (mismo código en la página de cada modelo):
+  ratón `0x01BB0100`, DPI `0x05xx0000`, multimedia `0x0200uuuu`, teclado `0x00MM00UU` (modificadores en el byte 1).
+  El M30 ofrece las mismas acciones que el MG5 salvo el brillo de pantalla. La web impide quitar el último clic
+  izquierdo.
+- **No hay comando para leer la tabla**: ni la clase del M30 ni la página leen nunca los botones, y la web no espera
+  respuesta al `0x01` (la manda por su cola de escritura). `setFactory()` no envía nada; la web restaura los botones
+  escribiendo la tabla de fábrica.
 
 ## Fallos de la web oficial (que la app no copia)
 
@@ -227,7 +240,10 @@ adelante (`0x01050100`), atrás (`0x01040100`) y ciclo DPI (`0x05040000`).
 Cada cambio lee el bloque con `0x44`, comprueba que es válido (longitud, checksum, no todo ceros/`FF`, byte
 de nivel DPI coherente), cambia solo los bits del ajuste, escribe con `0x04` y relee para verificar. Si la
 relectura no coincide reintenta una vez con cmdPara 1, como la web, y si tampoco, da error y no insiste.
-La reasignación de botones y las macros no están implementadas.
+Botones: como no se pueden leer, la app guarda la distribución que conoce: la del perfil activo de ese modelo
+(la última que se puso desde la app) o, si no hay, la de fábrica. Cada cambio comprueba antes que el ratón responde
+(lectura `0x44` válida) y manda la tabla entera con `0x01`; aplicar un perfil la reescribe siempre. Nunca se manda
+una tabla sin clic izquierdo. Las macros no están implementadas.
 
 Regla udev:
 
