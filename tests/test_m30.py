@@ -40,6 +40,7 @@ class FakeM30:
         self.accept = accept
         self.pending = b""
         self.writes = []
+        self.key_writes = []
 
     def send_feature_report(self, report_id: int, data: bytes) -> None:
         assert report_id == p.M30_REPORT_ID and len(data) == p.M30_FRAME_LEN
@@ -49,6 +50,9 @@ class FakeM30:
         payload = data[p.M30_PAYLOAD_OFFSET : p.M30_PAYLOAD_OFFSET + length]
         if cmd == p.M30_CMD_GET_CONFIG:
             self.pending = response(cmd, 0, bytes(self.block))
+        elif cmd == p.M30_CMD_SET_KEYS:
+            self.key_writes.append((para, bytes(payload)))
+            self.pending = response(cmd, 0, b"")
         elif cmd == p.M30_CMD_SET_CONFIG:
             self.writes.append((para, bytes(payload)))
             if para in self.accept:
@@ -66,6 +70,7 @@ def make_mouse(fake: FakeM30) -> p.M30:
     mouse = p.M30.__new__(p.M30)
     mouse.info = p.DeviceInfo("/dev/null", p.M30_MODEL.dongle_pid, p.M30_MODEL)
     mouse.dev = fake
+    mouse.keys = list(p.M30_DEFAULT_KEYS)
     return mouse
 
 
@@ -195,6 +200,56 @@ class WriteTests(unittest.TestCase):
         fake.get_feature_report = lambda *_a: b"\x00\x02\x00"
         with self.assertRaises(p.MouseOffline):
             make_mouse(fake).read_config()
+
+
+@mock.patch("rk_mg5.protocol.time.sleep", lambda _s: None)
+class ButtonTests(unittest.TestCase):
+    def test_key_table(self):
+        table = p.build_m30_key_table([0x01010100, 0x01020100, 0x01030100, 0x00010006, 0x020000E9, 0x05040000])
+        self.assertEqual(len(table), 80)
+        self.assertEqual(table[:24].hex(), "01010100010201000103010000010006020000e905040000")
+        self.assertEqual(table[24:], bytes(56))
+        frame = p.build_m30_frame(p.M30_CMD_SET_KEYS, 0, p.build_m30_key_table(list(p.M30_DEFAULT_KEYS)))
+        # Same frame as js/protocol.js in the web version.
+        self.assertEqual(frame[:31].hex(), "74010001005000010101000102010001030100010501000104010005040000")
+        with self.assertRaises(p.MG5Error):
+            p.build_m30_key_table([0x01020100] * 6)  # no left click
+        with self.assertRaises(p.MG5Error):
+            p.build_m30_key_table([0x01010100])
+
+    def test_set_key_writes_whole_table(self):
+        fake = FakeM30(sample_block())
+        mouse = make_mouse(fake)
+        mouse.keys = [0x01010100, 0x01020100, 0x01030100, 0x020000E9, 0x01040100, 0x05040000]
+        mouse.set_key(4, 0x020000EA)
+        self.assertEqual(len(fake.key_writes), 1)
+        para, payload = fake.key_writes[0]
+        self.assertEqual(para, 0)
+        self.assertEqual(payload[:24].hex(), "010101000102010001030100020000e9020000ea05040000")
+        self.assertEqual(mouse.read_keys(), [0x01010100, 0x01020100, 0x01030100, 0x020000E9, 0x020000EA, 0x05040000])
+        self.assertEqual(fake.writes, [])  # the config block is untouched
+
+    def test_refuses_bad_state(self):
+        asleep = FakeM30(bytes(400))
+        with self.assertRaises(p.MG5Error):
+            make_mouse(asleep).set_key(3, 0x020000E9)
+        self.assertEqual(asleep.key_writes, [])
+        fake = FakeM30(sample_block())
+        mouse = make_mouse(fake)
+        with self.assertRaises(p.MG5Error):
+            mouse.set_key(0, 0x01020100)  # would remove the only left click
+        self.assertEqual(fake.key_writes, [])
+        self.assertEqual(mouse.read_keys(), list(p.M30_DEFAULT_KEYS))
+
+    def test_profile_rewrites_table(self):
+        from rk_mg5.settings import Profile
+
+        fake = FakeM30(sample_block())
+        mouse = make_mouse(fake)
+        profile = Profile.from_mouse("M30", p.M30Config(sample_block()), list(p.M30_DEFAULT_KEYS), p.M30_MODEL.name)
+        profile.apply_to(mouse)
+        self.assertEqual(len(fake.key_writes), 1)
+        self.assertEqual(fake.key_writes[0][1][:24].hex(), "010101000102010001030100010501000104010005040000")
 
 
 class ModelTests(unittest.TestCase):

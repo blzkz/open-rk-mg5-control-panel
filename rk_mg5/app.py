@@ -321,10 +321,14 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _panel_customize(self) -> Gtk.Widget:
         panel = self._panel_box("PERSONALIZAR", "Haz clic en un botón del dibujo para cambiar lo que hace.")
-        self.remap_notice = _label("Este ratón no permite leer qué hace cada botón, así que la reasignación "
-                                   "está desactivada para no sobrescribir su configuración a ciegas.",
-                                   "panel-subtitle", visible=False)
-        panel.append(self.remap_notice)
+        notice = self.remap_notice = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, visible=False)
+        notice.append(_label("Este ratón no permite leer qué hace cada botón: el panel muestra la distribución de "
+                             "fábrica o la última que pusiste desde aquí, y cada cambio reescribe los seis botones.",
+                             "panel-subtitle"))
+        factory = Gtk.Button(label="Restaurar botones de fábrica", halign=Gtk.Align.START, css_classes=["flat"])
+        factory.connect("clicked", lambda *_: self.apply(lambda m, c: m.set_keys(list(a.DEFAULT_KEYS))))
+        notice.append(factory)
+        panel.append(notice)
         box = self.remap_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
         panel.append(box)
         self.button_title = _label("", "section-label", margin_top=8)
@@ -463,6 +467,8 @@ class MainWindow(Adw.ApplicationWindow):
         self._disconnect()
         try:
             self.mouse = p.open_device()
+            if not self.mouse.model.key_readback:
+                self.mouse.keys = self._known_keys(self.mouse.model)
             # Cheap check so a sleeping mouse doesn't block the UI on every retry.
             if self.mouse.info.wireless and not self.mouse.is_online(timeout=0.3):
                 raise p.MouseOffline()
@@ -500,6 +506,14 @@ class MainWindow(Adw.ApplicationWindow):
         self.stack.set_visible_child_name("settings")
         self._ensure_profile()
 
+    def _known_keys(self, model: p.Model) -> list[int]:
+        """For mice that can't report their buttons: the active profile's layout for this model
+        (the last one set from the panel), else the factory one."""
+        profile = self.app.profiles.get(self.app.settings.active_profile)
+        if profile is not None and profile.model == model.name and len(profile.buttons) == p.KEY_COUNT:
+            return [int(b, 16) for b in profile.buttons]
+        return list(a.DEFAULT_KEYS)
+
     def _read_keys(self) -> list[int]:
         # Without a way to read the buttons, keep the factory layout just for the labels.
         return self.mouse.read_keys() if self.mouse.model.key_remap else list(a.DEFAULT_KEYS)
@@ -512,7 +526,7 @@ class MainWindow(Adw.ApplicationWindow):
         self.banner.set_revealed(model.experimental)
         self.battery_box.set_visible(model.battery)
         self.battery_section.set_visible(model.battery)
-        self.remap_notice.set_visible(not model.key_remap)
+        self.remap_notice.set_visible(not model.key_readback)
         self.remap_box.set_visible(model.key_remap)
         self.mouse_view.set_callouts_visible(model.key_remap and self.panels.get_visible_child_name() == "customize")
         self.loading = True

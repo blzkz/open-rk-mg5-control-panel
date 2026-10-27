@@ -22,8 +22,9 @@ También reconoce el **Royal Kludge M30** (`258a:0138` receptor 2.4G, `258a:0136
 distinto sacado del configurador web oficial. **Nadie lo ha probado todavía con un M30 real.** La app muestra
 un aviso cuando hay uno conectado y solo ofrece lo que tiene: DPI 100–24000 en pasos de 100, hasta 6 niveles,
 sondeo hasta 1000 Hz, LOD, debounce (1–15 ms), Motion Sync, Ripple Control, corrección de ángulo y reposo.
-No hay batería, modo del sensor ni modo cristal, y la reasignación de botones está desactivada porque el M30
-no permite leerla.
+También se pueden reasignar los seis botones. No hay batería, modo del sensor ni modo cristal. Los botones no se
+pueden leer del M30: la app muestra la distribución de fábrica o la última que pusiste desde ella, cada cambio
+reescribe los seis botones y hay un botón para restaurar los de fábrica.
 
 Antes de cambiar nada, si tienes un M30, prueba la lectura (no escribe nada en el ratón) y comparte la salida en un issue:
 
