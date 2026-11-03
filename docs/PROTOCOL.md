@@ -215,9 +215,12 @@ no los ofrece.
 Revisado en un bundle posterior, `assets/index-CTQPyNpU.js` (la clase del M30 pasa a llamarse `Oye`, mismo protocolo):
 
 - `0x01`, cmdPara 0, un paquete, payload de **80 bytes**: un `keyRaw` u32 big-endian por botón en el orden
-  izquierdo, derecho, central, adelante, atrás, DPI (índices 0..5), y el resto a cero. La web manda siempre la tabla
+  izquierdo, derecho, central, lateral trasero, lateral delantero, DPI (índices 0..5), y el resto a cero. La web manda siempre la tabla
   entera, copiada del perfil que guarda en el navegador; nunca un botón suelto.
-- Tabla de fábrica: `01010100 01020100 01030100 01050100 01040100 05040000` (igual que el MG5).
+- Tabla de fábrica: `01010100 01020100 01030100 01040100 01050100 05040000`. Los laterales van **al revés que en el
+  MG5**: en el M30 el índice 3 es el lateral trasero (atrás, `0x01040100`) y el 4 el delantero (adelante,
+  `0x01050100`). Así lo define la distribución del M30 en la web (`assets/index-Cn9uWLGV.js`: índice 3 = `RB0`,
+  4 = `RB1`; en el MG5 es al revés), y lo confirmó una persona con un M30 real.
 - Los `keyRaw` y la forma de construirlos son los mismos que en el MG5 (mismo código en la página de cada modelo):
   ratón `0x01BB0100`, DPI `0x05xx0000`, multimedia `0x0200uuuu`, teclado `0x00MM00UU` (modificadores en el byte 1).
   El M30 ofrece las mismas acciones que el MG5 salvo el brillo de pantalla. La web impide quitar el último clic
@@ -228,6 +231,8 @@ Revisado en un bundle posterior, `assets/index-CTQPyNpU.js` (la clase del M30 pa
 
 ## Fallos de la web oficial (que la app no copia)
 
+- La tabla de botones de fábrica que manda para el M30 es la del MG5, con los laterales cambiados respecto a la
+  distribución del propio M30: «restaurar» deja atrás y adelante al revés.
 - `setDpiColor` escribe el canal rojo en los tres bytes del color.
 - `setReportRate` y `setLodHeight` parten del byte 5 en vez del byte que modifican, así que copian sus bits
   altos (motion sync) en el byte de polling o de LOD.

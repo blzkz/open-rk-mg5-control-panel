@@ -118,6 +118,9 @@ class MouseView(Gtk.Overlay):
         self.fixed = Gtk.Fixed(can_target=True)
         self.add_overlay(self.fixed)
 
+        # Callouts and regions follow the drawing; set_side_swapped maps the side buttons to the other keys.
+        self.callouts = CALLOUTS
+        self.regions = REGIONS
         self.labels: dict[int, Gtk.Button] = {}
         for callout in CALLOUTS:
             button = Gtk.Button(css_classes=["callout", callout.side])
@@ -145,6 +148,16 @@ class MouseView(Gtk.Overlay):
         for index, name in names.items():
             self.labels[index].set_label(name)
         self._layout()
+
+    def set_side_swapped(self, swapped: bool) -> None:
+        """On some mice (the M30) key 3 is the rear side button and key 4 the front one."""
+        def key(slot: int) -> int:
+            return 7 - slot if swapped and slot in (3, 4) else slot
+
+        self.callouts = [Callout(key(c.index), c.anchor, c.side, c.row) for c in CALLOUTS]
+        self.regions = {key(slot): draw for slot, draw in REGIONS.items()}
+        self._layout()
+        self.area.queue_draw()
 
     def set_callouts_visible(self, visible: bool) -> None:
         self.show_callouts = visible
@@ -181,7 +194,7 @@ class MouseView(Gtk.Overlay):
         geometry = self._geometry()
         scale, ox, _oy = geometry
         gap = 56
-        for callout in CALLOUTS:
+        for callout in self.callouts:
             button = self.labels[callout.index]
             _min, natural, _b1, _b2 = button.measure(Gtk.Orientation.HORIZONTAL, -1)
             _minh, height, _b3, _b4 = button.measure(Gtk.Orientation.VERTICAL, natural)
@@ -230,7 +243,7 @@ class MouseView(Gtk.Overlay):
         # Highlight the hovered / selected button.
         for index, alpha in ((self.hovered, 0.28), (self.selected, 0.45)):
             if index is not None and self.show_callouts:
-                REGIONS[index](cr)
+                self.regions[index](cr)
                 cr.set_source_rgba(*ACCENT, alpha)
                 cr.fill()
 
@@ -285,7 +298,7 @@ class MouseView(Gtk.Overlay):
     def _draw_callout_lines(self, cr, geometry) -> None:
         scale, ox, _oy = geometry
         cr.set_line_width(1)
-        for callout in CALLOUTS:
+        for callout in self.callouts:
             button = self.labels[callout.index]
             ax, ay = self._to_px(callout.anchor, geometry)
             _x, ly = self._to_px((0, callout.row), geometry)
