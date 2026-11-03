@@ -211,7 +211,7 @@ class ButtonTests(unittest.TestCase):
         self.assertEqual(table[24:], bytes(56))
         frame = p.build_m30_frame(p.M30_CMD_SET_KEYS, 0, p.build_m30_key_table(list(p.M30_DEFAULT_KEYS)))
         # Same frame as js/protocol.js in the web version.
-        self.assertEqual(frame[:31].hex(), "74010001005000010101000102010001030100010501000104010005040000")
+        self.assertEqual(frame[:31].hex(), "74010001005000010101000102010001030100010401000105010005040000")
         with self.assertRaises(p.MG5Error):
             p.build_m30_key_table([0x01020100] * 6)  # no left click
         with self.assertRaises(p.MG5Error):
@@ -249,10 +249,19 @@ class ButtonTests(unittest.TestCase):
         profile = Profile.from_mouse("M30", p.M30Config(sample_block()), list(p.M30_DEFAULT_KEYS), p.M30_MODEL.name)
         profile.apply_to(mouse)
         self.assertEqual(len(fake.key_writes), 1)
-        self.assertEqual(fake.key_writes[0][1][:24].hex(), "010101000102010001030100010501000104010005040000")
+        self.assertEqual(fake.key_writes[0][1][:24].hex(), "010101000102010001030100010401000105010005040000")
 
 
 class ModelTests(unittest.TestCase):
+    def test_factory_buttons_and_side_order(self):
+        from rk_mg5 import actions
+
+        self.assertEqual(list(p.MG5_MODEL.default_keys), actions.DEFAULT_KEYS)
+        self.assertFalse(p.MG5_MODEL.side_swapped)
+        # M30: key 3 (rear side button) = back, key 4 (front side button) = forward.
+        self.assertEqual(p.M30_MODEL.default_keys, (0x01010100, 0x01020100, 0x01030100, 0x01040100, 0x01050100, 0x05040000))
+        self.assertTrue(p.M30_MODEL.side_swapped)
+
     def test_find_device_picks_model(self):
         mg5 = HidrawInfo("/dev/hidraw7", 0x372E, 0x103F, "BY TECH RK MG5", b"\x06\x00\xff\x09\x01")
         m30 = HidrawInfo("/dev/hidraw3", 0x258A, 0x0136, "RK M30", b"\x05\x01\x06\x00\xff\x09\x01\x85\x09")

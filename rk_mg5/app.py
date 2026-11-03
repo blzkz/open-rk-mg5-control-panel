@@ -326,7 +326,7 @@ class MainWindow(Adw.ApplicationWindow):
                              "fábrica o la última que pusiste desde aquí, y cada cambio reescribe los seis botones.",
                              "panel-subtitle"))
         factory = Gtk.Button(label="Restaurar botones de fábrica", halign=Gtk.Align.START, css_classes=["flat"])
-        factory.connect("clicked", lambda *_: self.apply(lambda m, c: m.set_keys(list(a.DEFAULT_KEYS))))
+        factory.connect("clicked", lambda *_: self.apply(lambda m, c: m.set_keys(list(m.model.default_keys))))
         notice.append(factory)
         panel.append(notice)
         box = self.remap_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
@@ -362,7 +362,7 @@ class MainWindow(Adw.ApplicationWindow):
         box.append(keyboard)
 
         reset = Gtk.Button(label="Restaurar este botón", halign=Gtk.Align.START, css_classes=["flat"], margin_top=6)
-        reset.connect("clicked", lambda *_: self._assign(a.DEFAULT_KEYS[self.selected_button]))
+        reset.connect("clicked", lambda *_: self._assign(self._default_keys()[self.selected_button]))
         box.append(reset)
         return panel
 
@@ -512,7 +512,15 @@ class MainWindow(Adw.ApplicationWindow):
         profile = self.app.profiles.get(self.app.settings.active_profile)
         if profile is not None and profile.model == model.name and len(profile.buttons) == p.KEY_COUNT:
             return [int(b, 16) for b in profile.buttons]
-        return list(a.DEFAULT_KEYS)
+        return list(model.default_keys)
+
+    def _default_keys(self) -> list[int]:
+        return list(self.mouse.model.default_keys) if self.mouse is not None else list(a.DEFAULT_KEYS)
+
+    def _button_name(self, index: int) -> str:
+        """Names follow the physical position, which for some models (the M30) swaps keys 3 and 4."""
+        swapped = self.mouse is not None and self.mouse.model.side_swapped and index in (3, 4)
+        return a.BUTTON_NAMES[7 - index if swapped else index]
 
     def _read_keys(self) -> list[int]:
         # Without a way to read the buttons, keep the factory layout just for the labels.
@@ -528,6 +536,7 @@ class MainWindow(Adw.ApplicationWindow):
         self.battery_section.set_visible(model.battery)
         self.remap_notice.set_visible(not model.key_readback)
         self.remap_box.set_visible(model.key_remap)
+        self.mouse_view.set_side_swapped(model.side_swapped)
         self.mouse_view.set_callouts_visible(model.key_remap and self.panels.get_visible_child_name() == "customize")
         self.loading = True
         try:
@@ -722,7 +731,7 @@ class MainWindow(Adw.ApplicationWindow):
         self.selected_button = index
         self.mouse_view.set_selected(index)
         current = self.keys[index]
-        self.button_title.set_label(f"{a.BUTTON_NAMES[index].upper()} · {a.describe(current)}")
+        self.button_title.set_label(f"{self._button_name(index).upper()} · {a.describe(current)}")
         for raw, row in self.action_rows.items():
             row.check.set_visible(raw == current)
             if raw == current:

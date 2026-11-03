@@ -69,6 +69,13 @@ PERF_MOTION_SYNC = 0x20
 
 
 
+# Factory button tables, by key index (left, right, middle, key 3, key 4, DPI). On the M30 key 3 is the
+# rear side button and key 4 the front one, the other way round from the MG5: the official app's M30
+# layout puts back (0x01040100) on key 3, but the table it sends is the MG5's. A tester confirmed it.
+MG5_DEFAULT_KEYS = (0x01010100, 0x01020100, 0x01030100, 0x01050100, 0x01040100, 0x05040000)
+M30_DEFAULT_KEYS = (0x01010100, 0x01020100, 0x01030100, 0x01040100, 0x01050100, 0x05040000)
+
+
 @dataclass(frozen=True)
 class Model:
     """What each supported mouse offers. The panel adapts its options to this."""
@@ -91,6 +98,9 @@ class Model:
     experimental: bool = False
     # False when the buttons can be written but not read back: the panel keeps the layout it last wrote.
     key_readback: bool = True
+    default_keys: tuple[int, ...] = MG5_DEFAULT_KEYS
+    # True when key 3 is the rear side button and key 4 the front one.
+    side_swapped: bool = False
 
     @property
     def product_ids(self) -> tuple[int, int]:
@@ -108,6 +118,7 @@ M30_MODEL = Model(
     dpi_min=100, dpi_max=24000, dpi_step=100, report_rates=(125, 250, 500, 1000),
     sleep_times=(0, 60, 120, 180, 300, 600, 900, 1800, 3600), debounce_max=15,
     battery=False, sensor_mode=False, glass_mode=False, key_remap=True, experimental=True, key_readback=False,
+    default_keys=M30_DEFAULT_KEYS, side_swapped=True,
 )
 MODELS = (MG5_MODEL, M30_MODEL)
 
@@ -425,11 +436,11 @@ M30_OFF_SLEEP = 74  # minutes
 M30_REPORT_RATES = {125: 1, 250: 2, 500: 3, 1000: 4}
 M30_REPORT_RATE_BY_ID = {v: k for k, v in M30_REPORT_RATES.items()}
 
-# Button table sent with 0x01: one big-endian u32 keyRaw per button (left, right, middle, forward,
-# back, DPI), zero-padded to 80 bytes. Same keyRaw values as the MG5 (see actions.py).
+# Button table sent with 0x01: one big-endian u32 keyRaw per button (left, right, middle, rear side,
+# front side, DPI), zero-padded to 80 bytes. Same keyRaw values as the MG5 (see actions.py); the factory
+# table is M30_DEFAULT_KEYS, at the top.
 M30_KEY_TABLE_LEN = 80
 M30_LEFT_CLICK = 0x01010100
-M30_DEFAULT_KEYS = (0x01010100, 0x01020100, 0x01030100, 0x01050100, 0x01040100, 0x05040000)
 
 
 def encode_m30_dpi(dpi: int) -> int:
